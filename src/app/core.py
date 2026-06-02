@@ -270,15 +270,16 @@ except Exception:  # pragma: no cover
 
 @dataclass(slots=True)
 class R6244Commands:
-    idn_query: str = "*IDN?"
-    set_current_mode: str = "SOUR:FUNC CURR"
-    set_voltage_mode: str = "SOUR:FUNC VOLT"
-    set_current: str = "SOUR:CURR {value}"
-    set_voltage: str = "SOUR:VOLT {value}"
-    output_on: str = "OUTP ON"
-    output_off: str = "OUTP OFF"
-    measure_voltage: str = "MEAS:VOLT?"
-    measure_current: str = "MEAS:CURR?"
+    device_clear: str = "C"
+    dc_operation: str = "MD0"
+    constant_voltage_mode: str = "VF"
+    constant_current_mode: str = "IF"
+    set_current: str = "D{value}UA"
+    set_voltage: str = "D{value}V"
+    operate: str = "E"
+    hold: str = "H"
+    measure_current: str = "F2"
+    measure_voltage: str = "F1"
 
 
 @dataclass(slots=True)
@@ -301,7 +302,8 @@ class R6244Device(BaseDevice):
         self._rm = pyvisa.ResourceManager()
         self._resource = self._rm.open_resource(resource_name)
         self._resource.timeout = self.timeout_ms
-        self._state = DeviceState(True, resource_name, self.identify(), "idle", 0.0, 0.0, False)
+        self._write(self.commands.device_clear)
+        self._state = DeviceState(True, resource_name, "R6244 Device", "idle", 0.0, 0.0, False)
         return self._state
 
     def disconnect(self) -> None:
@@ -322,40 +324,52 @@ class R6244Device(BaseDevice):
     def identify(self) -> str:
         if self._resource is None:
             return "SIMULATED"
-        return str(self._resource.query(self.commands.idn_query)).strip()
+        return "R6244 Device"
 
     def _write(self, text: str) -> None:
         if self._resource is not None:
             self._resource.write(text)
 
-    def _query_float(self, text: str) -> float:
+    def _query(self, text: str) -> str:
         if self._resource is None:
-            return 0.0
-        return float(self._resource.query(text).strip())
+            return ""
+        return str(self._resource.query(text)).strip()
 
     def set_constant_current(self, current_a: float) -> None:
         self._state.mode = "constant_current"
         self._state.current_a = current_a
-        self._write(self.commands.set_current_mode)
+        self._write(self.commands.dc_operation)
+        self._write(self.commands.constant_current_mode)
         self._write(self.commands.set_current.format(value=current_a))
 
     def set_constant_voltage(self, voltage_v: float) -> None:
         self._state.mode = "constant_voltage"
         self._state.voltage_v = voltage_v
-        self._write(self.commands.set_voltage_mode)
+        self._write(self.commands.dc_operation)
+        self._write(self.commands.constant_voltage_mode)
         self._write(self.commands.set_voltage.format(value=voltage_v))
 
     def read_voltage(self) -> float:
-        self._state.voltage_v = self._query_float(self.commands.measure_voltage)
+        response = self._query(self.commands.measure_voltage)
+        if len(response) >= 15:
+            try:
+                self._state.voltage_v = float(response[3:14])
+            except (ValueError, IndexError):
+                self._state.voltage_v = 0.0
         return self._state.voltage_v
 
     def read_current(self) -> float:
-        self._state.current_a = self._query_float(self.commands.measure_current)
+        response = self._query(self.commands.measure_current)
+        if len(response) >= 15:
+            try:
+                self._state.current_a = float(response[3:14]) * 1e-6
+            except (ValueError, IndexError):
+                self._state.current_a = 0.0
         return self._state.current_a
 
     def output(self, enabled: bool) -> None:
         self._state.output_enabled = enabled
-        self._write(self.commands.output_on if enabled else self.commands.output_off)
+        self._write(self.commands.operate if enabled else self.commands.hold)
 
 
 @dataclass(slots=True)

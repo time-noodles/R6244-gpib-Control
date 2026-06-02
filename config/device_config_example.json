@@ -1,7 +1,7 @@
 {
   "device": {
     "mode": "real",
-    "resource_name": "GPIB::19",
+    "resource_name": "GPIB::1",
     "timeout_ms": 5000,
     "commands": {
       "device_clear": "C",
@@ -33,6 +33,6 @@
     "charge_efficiency": 1.0
   },
   "ui": {
-    "window_title": "Electrochemistry Control App - R6244"
+    "window_title": "Electrochemistry Control App - R6244 (Device 1)"
   }
 }
