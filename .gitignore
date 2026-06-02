@@ -3,3 +3,4 @@ pyvisa_pkgs/
 
 # 特定の拡張子を除外
 *.exe
+*.xls
