@@ -1,0 +1,37 @@
+{
+  "device": {
+    "mode": "simulation",
+    "resource_name": "GPIB0::1::INSTR",
+    "timeout_ms": 5000,
+    "commands": {
+      "idn_query": "*IDN?",
+      "set_current_mode": "SOUR:FUNC CURR",
+      "set_voltage_mode": "SOUR:FUNC VOLT",
+      "set_current": "SOUR:CURR {value}",
+      "set_voltage": "SOUR:VOLT {value}",
+      "output_on": "OUTP ON",
+      "output_off": "OUTP OFF",
+      "measure_voltage": "MEAS:VOLT?",
+      "measure_current": "MEAS:CURR?"
+    }
+  },
+  "measurement": {
+    "sample_interval_s": 1.0,
+    "max_duration_s": 3600.0,
+    "current_a": 0.01,
+    "voltage_v": 1.0,
+    "current_limit_a": 1.0,
+    "voltage_limit_v": 10.0,
+    "scan_start_v": -1.0,
+    "scan_stop_v": 1.0,
+    "scan_rate_v_per_s": 0.1,
+    "cycles": 1,
+    "mass_g": 1.0,
+    "formula": "LiFePO4",
+    "electrons": 1,
+    "charge_efficiency": 1.0
+  },
+  "ui": {
+    "window_title": "Electrochemistry Control App"
+  }
+}

@@ -1,0 +1,576 @@
+from __future__ import annotations
+
+import math
+import queue
+import random
+import re
+import threading
+import time
+from abc import ABC, abstractmethod
+from collections import defaultdict
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+
+FARADAY_CONSTANT = 96485.33212
+
+try:
+    from rdkit import Chem
+    PT = Chem.GetPeriodicTable()
+except Exception as exc:  # pragma: no cover - RDKit must be installed
+    raise RuntimeError("RDKit が見つかりません。RDKit をインストールしてください。Windows の場合は対応する wheel を用意してください") from exc
+
+
+def _atomic_weight(symbol: str) -> float:
+    z = PT.GetAtomicNumber(symbol)
+    if not z:
+        raise ValueError(f"不明な元素: {symbol}")
+    return float(PT.GetAtomicWeight(z))
+
+
+class MeasurementMode(str, Enum):
+    CONSTANT_CURRENT = "constant_current"
+    CONSTANT_VOLTAGE = "constant_voltage"
+    CV = "cv"
+
+
+@dataclass(slots=True)
+class MeasurementParameters:
+    mode: MeasurementMode = MeasurementMode.CONSTANT_CURRENT
+    sample_interval_s: float = 1.0
+    max_duration_s: float = 3600.0
+    current_a: float = 0.01
+    voltage_v: float = 1.0
+    current_limit_a: float = 1.0
+    voltage_limit_v: float = 10.0
+    scan_start_v: float = -1.0
+    scan_stop_v: float = 1.0
+    scan_rate_v_per_s: float = 0.1
+    cycles: int = 1
+    mass_g: float = 1.0
+    formula: str = "LiFePO4"
+    electrons: int = 1
+    charge_efficiency: float = 1.0
+    target_charge_c: float = 0.0
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "MeasurementParameters":
+        mode = MeasurementMode(data.get("mode", "constant_current"))
+        return cls(
+            mode=mode,
+            sample_interval_s=float(data.get("sample_interval_s", 1.0)),
+            max_duration_s=float(data.get("max_duration_s", 3600.0)),
+            current_a=float(data.get("current_a", 0.01)),
+            voltage_v=float(data.get("voltage_v", 1.0)),
+            current_limit_a=float(data.get("current_limit_a", 1.0)),
+            voltage_limit_v=float(data.get("voltage_limit_v", 10.0)),
+            scan_start_v=float(data.get("scan_start_v", -1.0)),
+            scan_stop_v=float(data.get("scan_stop_v", 1.0)),
+            scan_rate_v_per_s=float(data.get("scan_rate_v_per_s", 0.1)),
+            cycles=int(data.get("cycles", 1)),
+            mass_g=float(data.get("mass_g", 1.0)),
+            formula=str(data.get("formula", "LiFePO4")),
+            electrons=int(data.get("electrons", 1)),
+            charge_efficiency=float(data.get("charge_efficiency", 1.0)),
+        )
+
+    def compute_target_charge(self) -> float:
+        self.target_charge_c = charge_from_mass_formula(
+            mass_g=self.mass_g,
+            formula=self.formula,
+            electrons=self.electrons,
+            charge_efficiency=self.charge_efficiency,
+        )
+        return self.target_charge_c
+
+
+@dataclass(slots=True)
+class MeasurementPoint:
+    time_s: float
+    voltage_v: float
+    current_a: float
+    charge_c: float
+
+
+@dataclass(slots=True)
+class MeasurementResult:
+    time_s: list[float] = field(default_factory=list)
+    voltage_v: list[float] = field(default_factory=list)
+    current_a: list[float] = field(default_factory=list)
+    charge_c: list[float] = field(default_factory=list)
+    mode: str = ""
+    finished_reason: str = ""
+
+    def append(self, point: MeasurementPoint) -> None:
+        self.time_s.append(point.time_s)
+        self.voltage_v.append(point.voltage_v)
+        self.current_a.append(point.current_a)
+        self.charge_c.append(point.charge_c)
+
+
+@dataclass(slots=True)
+class DeviceState:
+    connected: bool = False
+    resource_name: str = ""
+    idn: str = ""
+    mode: str = "idle"
+    voltage_v: float = 0.0
+    current_a: float = 0.0
+    output_enabled: bool = False
+
+
+def _tokenize(formula: str) -> list[str]:
+    tokens: list[str] = []
+    index = 0
+    while index < len(formula):
+        char = formula[index]
+        if char.isspace():
+            index += 1
+            continue
+        if char in "()[]{}":
+            tokens.append(char)
+            index += 1
+            continue
+        if char.isdigit():
+            end = index + 1
+            while end < len(formula) and formula[end].isdigit():
+                end += 1
+            tokens.append(formula[index:end])
+            index = end
+            continue
+        if char.isalpha():
+            end = index + 1
+            while end < len(formula) and formula[end].islower():
+                end += 1
+            tokens.append(formula[index:end])
+            index = end
+            continue
+        raise ValueError(f"Unsupported character in formula: {char}")
+    return tokens
+
+
+def _parse_tokens(tokens: list[str], start: int = 0) -> tuple[dict[str, int], int]:
+    counts: defaultdict[str, int] = defaultdict(int)
+    index = start
+    while index < len(tokens):
+        token = tokens[index]
+        if token in ")]}":
+            return dict(counts), index + 1
+        if token in "([{":
+            nested, index = _parse_tokens(tokens, index + 1)
+            multiplier = 1
+            if index < len(tokens) and tokens[index].isdigit():
+                multiplier = int(tokens[index])
+                index += 1
+            for element, count in nested.items():
+                counts[element] += count * multiplier
+            continue
+        if token.isdigit():
+            raise ValueError("Unexpected number in formula")
+        element = token
+        try:
+            _atomic_weight(element)
+        except ValueError:
+            raise ValueError(f"Unsupported element: {element}")
+        amount = 1
+        if index + 1 < len(tokens) and tokens[index + 1].isdigit():
+            amount = int(tokens[index + 1])
+            index += 1
+        counts[element] += amount
+        index += 1
+    return dict(counts), index
+
+
+def molar_mass(formula: str) -> float:
+    tokens = _tokenize(formula)
+    counts, index = _parse_tokens(tokens)
+    if index != len(tokens):
+        raise ValueError("Failed to parse full formula")
+    mass = 0.0
+    for element, amount in counts.items():
+        mass += _atomic_weight(element) * amount
+    return mass
+
+
+def amount_of_substance(mass_g: float, formula: str) -> float:
+    return mass_g / molar_mass(formula)
+
+
+def charge_from_mass_formula(mass_g: float, formula: str, electrons: int, charge_efficiency: float = 1.0) -> float:
+    return amount_of_substance(mass_g, formula) * electrons * FARADAY_CONSTANT * charge_efficiency
+
+
+def format_current(value_a: float) -> str:
+    abs_value = abs(value_a)
+    if abs_value >= 1:
+        return f"{value_a:.6f} A"
+    if abs_value >= 1e-3:
+        return f"{value_a * 1e3:.3f} mA"
+    if abs_value >= 1e-6:
+        return f"{value_a * 1e6:.3f} uA"
+    return f"{value_a * 1e9:.3f} nA"
+
+
+def format_voltage(value_v: float) -> str:
+    return f"{value_v:.6f} V"
+
+
+def format_charge(value_c: float) -> str:
+    abs_value = abs(value_c)
+    if abs_value >= 1:
+        return f"{value_c:.6f} C"
+    if abs_value >= 1e-3:
+        return f"{value_c * 1e3:.3f} mC"
+    return f"{value_c * 1e6:.3f} uC"
+
+
+def safe_resource_name(resource_name: str, gpib_address: str) -> str:
+    return resource_name.strip() or (f"GPIB0::{gpib_address.strip()}::INSTR" if gpib_address.strip() else "")
+
+
+class BaseDevice(ABC):
+    @abstractmethod
+    def connect(self, resource_name: str) -> DeviceState:
+        raise NotImplementedError
+
+    @abstractmethod
+    def disconnect(self) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def identify(self) -> str:
+        raise NotImplementedError
+
+    @abstractmethod
+    def set_constant_current(self, current_a: float) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def set_constant_voltage(self, voltage_v: float) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def read_voltage(self) -> float:
+        raise NotImplementedError
+
+    @abstractmethod
+    def read_current(self) -> float:
+        raise NotImplementedError
+
+    @abstractmethod
+    def output(self, enabled: bool) -> None:
+        raise NotImplementedError
+
+
+try:
+    import pyvisa
+except Exception:  # pragma: no cover
+    pyvisa = None
+
+
+@dataclass(slots=True)
+class R6244Commands:
+    idn_query: str = "*IDN?"
+    set_current_mode: str = "SOUR:FUNC CURR"
+    set_voltage_mode: str = "SOUR:FUNC VOLT"
+    set_current: str = "SOUR:CURR {value}"
+    set_voltage: str = "SOUR:VOLT {value}"
+    output_on: str = "OUTP ON"
+    output_off: str = "OUTP OFF"
+    measure_voltage: str = "MEAS:VOLT?"
+    measure_current: str = "MEAS:CURR?"
+
+
+@dataclass(slots=True)
+class R6244Device(BaseDevice):
+    commands: R6244Commands = field(default_factory=R6244Commands)
+    timeout_ms: int = 5000
+
+    def __post_init__(self) -> None:
+        self._resource = None
+        self._rm = None
+        self._state = DeviceState()
+
+    @property
+    def state(self) -> DeviceState:
+        return self._state
+
+    def connect(self, resource_name: str) -> DeviceState:
+        if pyvisa is None:
+            raise RuntimeError("pyvisa が利用できません。オフライン依存を導入してください。")
+        self._rm = pyvisa.ResourceManager()
+        self._resource = self._rm.open_resource(resource_name)
+        self._resource.timeout = self.timeout_ms
+        self._state = DeviceState(True, resource_name, self.identify(), "idle", 0.0, 0.0, False)
+        return self._state
+
+    def disconnect(self) -> None:
+        try:
+            self.output(False)
+        except Exception:
+            pass
+        try:
+            if self._resource is not None:
+                self._resource.close()
+        finally:
+            if self._rm is not None:
+                self._rm.close()
+            self._resource = None
+            self._rm = None
+            self._state = DeviceState()
+
+    def identify(self) -> str:
+        if self._resource is None:
+            return "SIMULATED"
+        return str(self._resource.query(self.commands.idn_query)).strip()
+
+    def _write(self, text: str) -> None:
+        if self._resource is not None:
+            self._resource.write(text)
+
+    def _query_float(self, text: str) -> float:
+        if self._resource is None:
+            return 0.0
+        return float(self._resource.query(text).strip())
+
+    def set_constant_current(self, current_a: float) -> None:
+        self._state.mode = "constant_current"
+        self._state.current_a = current_a
+        self._write(self.commands.set_current_mode)
+        self._write(self.commands.set_current.format(value=current_a))
+
+    def set_constant_voltage(self, voltage_v: float) -> None:
+        self._state.mode = "constant_voltage"
+        self._state.voltage_v = voltage_v
+        self._write(self.commands.set_voltage_mode)
+        self._write(self.commands.set_voltage.format(value=voltage_v))
+
+    def read_voltage(self) -> float:
+        self._state.voltage_v = self._query_float(self.commands.measure_voltage)
+        return self._state.voltage_v
+
+    def read_current(self) -> float:
+        self._state.current_a = self._query_float(self.commands.measure_current)
+        return self._state.current_a
+
+    def output(self, enabled: bool) -> None:
+        self._state.output_enabled = enabled
+        self._write(self.commands.output_on if enabled else self.commands.output_off)
+
+
+@dataclass(slots=True)
+class SimulatedR6244Device(BaseDevice):
+    resource_name: str = "SIMULATOR"
+    resistance_ohm: float = 10.0
+
+    def __post_init__(self) -> None:
+        self._state = DeviceState(False, self.resource_name, "SIMULATED R6244", "idle", 0.0, 0.0, False)
+        self.target_current_a = 0.0
+        self.target_voltage_v = 0.0
+
+    @property
+    def state(self) -> DeviceState:
+        return self._state
+
+    def connect(self, resource_name: str) -> DeviceState:
+        self._state = DeviceState(True, resource_name, "SIMULATED R6244", "idle", 0.0, 0.0, False)
+        return self._state
+
+    def disconnect(self) -> None:
+        self._state = DeviceState(False, self.resource_name, "SIMULATED R6244", "idle", 0.0, 0.0, False)
+
+    def identify(self) -> str:
+        return "SIMULATED R6244"
+
+    def set_constant_current(self, current_a: float) -> None:
+        self._state.mode = "constant_current"
+        self.target_current_a = current_a
+
+    def set_constant_voltage(self, voltage_v: float) -> None:
+        self._state.mode = "constant_voltage"
+        self.target_voltage_v = voltage_v
+
+    def read_voltage(self) -> float:
+        if self._state.output_enabled:
+            self._state.voltage_v += (self.target_voltage_v - self._state.voltage_v) * 0.2
+        self._state.voltage_v += random.uniform(-0.005, 0.005)
+        return self._state.voltage_v
+
+    def read_current(self) -> float:
+        if self._state.output_enabled:
+            self._state.current_a += (self.target_current_a - self._state.current_a) * 0.2
+            if self._state.mode == "constant_voltage":
+                self._state.current_a = self._state.voltage_v / self.resistance_ohm
+        self._state.current_a += random.uniform(-0.0005, 0.0005)
+        return self._state.current_a
+
+    def output(self, enabled: bool) -> None:
+        self._state.output_enabled = enabled
+
+
+def build_device(device_config: dict) -> BaseDevice:
+    mode = device_config.get("mode", "simulation")
+    if mode == "simulation":
+        return SimulatedR6244Device(resource_name=device_config.get("resource_name", "SIMULATOR"))
+    commands = R6244Commands(**device_config.get("commands", {}))
+    return R6244Device(commands=commands, timeout_ms=int(device_config.get("timeout_ms", 5000)))
+
+
+@dataclass(slots=True)
+class ElectrochemistryController:
+    device: BaseDevice
+
+    def connect(self, resource_name: str) -> DeviceState:
+        return self.device.connect(resource_name)
+
+    def disconnect(self) -> None:
+        self.device.disconnect()
+
+    def identify(self) -> str:
+        return self.device.identify()
+
+    def set_constant_current(self, current_a: float) -> None:
+        self.device.set_constant_current(current_a)
+
+    def set_constant_voltage(self, voltage_v: float) -> None:
+        self.device.set_constant_voltage(voltage_v)
+
+    def read_voltage(self) -> float:
+        return self.device.read_voltage()
+
+    def read_current(self) -> float:
+        return self.device.read_current()
+
+    def output(self, enabled: bool) -> None:
+        self.device.output(enabled)
+
+
+def within_limits(voltage_v: float, current_a: float, voltage_limit_v: float, current_limit_a: float) -> bool:
+    return abs(voltage_v) <= abs(voltage_limit_v) and abs(current_a) <= abs(current_limit_a)
+
+
+@dataclass(slots=True)
+class MeasurementEvent:
+    kind: str
+    payload: dict
+
+
+class MeasurementManager:
+    def __init__(self, controller: ElectrochemistryController) -> None:
+        self.controller = controller
+        self.events: "queue.Queue[MeasurementEvent]" = queue.Queue()
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self.result = MeasurementResult()
+
+    def start(self, params: MeasurementParameters) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            raise RuntimeError("測定中です")
+        self._stop_event.clear()
+        self.result = MeasurementResult(mode=params.mode.value)
+        self._thread = threading.Thread(target=self._run, args=(params,), daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self.controller.output(False)
+        self.events.put(MeasurementEvent("status", {"message": "停止要求を送信しました"}))
+
+    def _emit(self, kind: str, **payload: object) -> None:
+        self.events.put(MeasurementEvent(kind, payload))
+
+    def _run(self, params: MeasurementParameters) -> None:
+        start_time = time.monotonic()
+        accumulated_charge = 0.0
+        try:
+            if params.mode == MeasurementMode.CONSTANT_CURRENT:
+                params.compute_target_charge()
+                self.controller.set_constant_current(params.current_a)
+            elif params.mode == MeasurementMode.CONSTANT_VOLTAGE:
+                self.controller.set_constant_voltage(params.voltage_v)
+            elif params.mode == MeasurementMode.CV:
+                self.controller.set_constant_voltage(params.scan_start_v)
+            else:
+                raise ValueError(f"未対応のモードです: {params.mode}")
+
+            self.controller.output(True)
+
+            if params.mode == MeasurementMode.CV:
+                for _ in range(max(1, params.cycles)):
+                    for voltage_v in self._voltage_path(params.scan_start_v, params.scan_stop_v, params.scan_rate_v_per_s, params.sample_interval_s):
+                        if self._stop_event.is_set():
+                            break
+                        self.controller.set_constant_voltage(voltage_v)
+                        time.sleep(params.sample_interval_s)
+                        measured_voltage = self.controller.read_voltage()
+                        measured_current = self.controller.read_current()
+                        elapsed = time.monotonic() - start_time
+                        accumulated_charge += abs(measured_current) * params.sample_interval_s
+                        point = MeasurementPoint(elapsed, measured_voltage, measured_current, accumulated_charge)
+                        self.result.append(point)
+                        self._emit("point", point=point)
+                        if not within_limits(measured_voltage, measured_current, params.voltage_limit_v, params.current_limit_a):
+                            raise RuntimeError("安全制限を超えました")
+                    if self._stop_event.is_set():
+                        break
+            else:
+                while not self._stop_event.is_set():
+                    time.sleep(params.sample_interval_s)
+                    measured_voltage = self.controller.read_voltage()
+                    measured_current = self.controller.read_current()
+                    elapsed = time.monotonic() - start_time
+                    if params.mode == MeasurementMode.CONSTANT_CURRENT:
+                        accumulated_charge += abs(measured_current) * params.sample_interval_s
+                    else:
+                        accumulated_charge += abs(measured_current) * params.sample_interval_s
+                    point = MeasurementPoint(elapsed, measured_voltage, measured_current, accumulated_charge)
+                    self.result.append(point)
+                    self._emit("point", point=point)
+                    if not within_limits(measured_voltage, measured_current, params.voltage_limit_v, params.current_limit_a):
+                        raise RuntimeError("安全制限を超えました")
+                    if params.mode == MeasurementMode.CONSTANT_CURRENT and accumulated_charge >= params.target_charge_c:
+                        self.result.finished_reason = "target_charge"
+                        self._emit("finished", reason="target_charge")
+                        break
+                    if elapsed >= params.max_duration_s:
+                        self.result.finished_reason = "max_duration"
+                        self._emit("finished", reason="max_duration")
+                        break
+        except Exception as exc:  # pragma: no cover - runtime error path
+            self.result.finished_reason = f"error: {exc}"
+            self._emit("error", message=str(exc))
+        finally:
+            self.controller.output(False)
+            self._emit("status", message="測定を終了しました")
+
+    def _voltage_path(self, start_v: float, stop_v: float, rate_v_per_s: float, sample_interval_s: float):
+        step = max(1e-6, abs(rate_v_per_s) * sample_interval_s)
+        if start_v <= stop_v:
+            voltage = start_v
+            while voltage <= stop_v:
+                yield voltage
+                voltage += step
+            voltage = stop_v
+            while voltage >= start_v:
+                yield voltage
+                voltage -= step
+        else:
+            voltage = start_v
+            while voltage >= stop_v:
+                yield voltage
+                voltage -= step
+            voltage = stop_v
+            while voltage <= start_v:
+                yield voltage
+                voltage += step
+
+
+def save_measurement_csv(path: Path, result: MeasurementResult) -> None:
+    import csv
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["time_s", "voltage_v", "current_a", "charge_c"])
+        for row in zip(result.time_s, result.voltage_v, result.current_a, result.charge_c):
+            writer.writerow(row)
