@@ -261,6 +261,11 @@ class BaseDevice(ABC):
     def output(self, enabled: bool) -> None:
         raise NotImplementedError
 
+    @abstractmethod
+    def update_output_voltage(self, voltage_v: float) -> None:
+        """出力中に電位値だけを更新する（モード初期化コマンドは送らない）。"""
+        raise NotImplementedError
+
 
 try:
     import pyvisa
@@ -274,8 +279,6 @@ class R6244Commands:
     dc_operation: str = "MD0"
     constant_voltage_mode: str = "VF"
     constant_current_mode: str = "IF"
-    set_current: str = "D{value}UA"
-    set_voltage: str = "D{value}V"
     operate: str = "E"
     hold: str = "H"
     measure_current: str = "F2"
@@ -291,6 +294,7 @@ class R6244Device(BaseDevice):
         self._resource = None
         self._rm = None
         self._state = DeviceState()
+        self.debug_mode = False  # Enable to see sent commands
 
     @property
     def state(self) -> DeviceState:
@@ -327,49 +331,97 @@ class R6244Device(BaseDevice):
         return "R6244 Device"
 
     def _write(self, text: str) -> None:
+        if self.debug_mode:
+            print(f"[SEND] {repr(text)}")
         if self._resource is not None:
             self._resource.write(text)
 
     def _query(self, text: str) -> str:
+        if self.debug_mode:
+            print(f"[QUERY] {repr(text)}")
         if self._resource is None:
             return ""
-        return str(self._resource.query(text)).strip()
+        response = str(self._resource.query(text)).strip()
+        if self.debug_mode:
+            print(f"[RESP] {repr(response)}")
+        return response
 
     def set_constant_current(self, current_a: float) -> None:
         self._state.mode = "constant_current"
         self._state.current_a = current_a
         self._write(self.commands.dc_operation)
         self._write(self.commands.constant_current_mode)
-        self._write(self.commands.set_current.format(value=current_a))
+        # R6244 電流コマンドは UA（マイクロアンペア）単位。
+        # VBA: DCI = Int(DCI_ua * 100) / 100  → 0.01 µA 精度に切り捨て
+        # VBA: Str() は正の数に先頭スペースを付けるが、整数は小数点なし。
+        current_ua = current_a * 1e6
+        current_ua_truncated = int(current_ua * 100) / 100
+        if current_ua_truncated == int(current_ua_truncated):
+            num_str = str(int(current_ua_truncated))  # 例: "10000"（小数点なし）
+        else:
+            num_str = str(current_ua_truncated)       # 例: "10000.5"
+        cmd = f"D {num_str}UA"  # 先頭スペース = VBA Str() の正数フォーマット
+        self._write(cmd)
 
     def set_constant_voltage(self, voltage_v: float) -> None:
         self._state.mode = "constant_voltage"
         self._state.voltage_v = voltage_v
         self._write(self.commands.dc_operation)
         self._write(self.commands.constant_voltage_mode)
-        self._write(self.commands.set_voltage.format(value=voltage_v))
+        # VBA Str() emulation: prepend space before number
+        cmd = f"D {voltage_v}V"
+        self._write(cmd)
+
+    # R6244 応答から数値を抽出する共通関数。
+    # VBA: Mid(response, 4, 11) → 3文字ヘッダの後に数値。
+    # 後第に複数フォーマット（円笠数記法・固定小数点）に対応するため正規表現で。
+    _RESPONSE_NUM_RE = re.compile(
+        r'[+-]?\d+\.?\d*(?:[Ee][+-]?\d+)?'
+    )
+
+    def _parse_response_value(self, response: str) -> float | None:
+        """応答文字列から最初の数値を返す。
+
+        VBA: Val(Mid(response, 4, 11))
+        実機の応答フォーマットが少しずれていても確実に取り出せるようヘッダ(3文字)以降を対象とする。"""
+        if self.debug_mode:
+            print(f"[PARSE] response={repr(response)}")
+        # ヘッダ 3 文字をスキップして数値を検索
+        search_str = response[3:] if len(response) > 3 else response
+        m = self._RESPONSE_NUM_RE.search(search_str)
+        if m is None:
+            if self.debug_mode:
+                print(f"[PARSE] 数値が見つかりませんでした")
+            return None
+        try:
+            return float(m.group())
+        except ValueError:
+            return None
 
     def read_voltage(self) -> float:
         response = self._query(self.commands.measure_voltage)
-        if len(response) >= 15:
-            try:
-                self._state.voltage_v = float(response[3:14])
-            except (ValueError, IndexError):
-                self._state.voltage_v = 0.0
+        value = self._parse_response_value(response)
+        if value is not None:
+            self._state.voltage_v = value
         return self._state.voltage_v
 
     def read_current(self) -> float:
         response = self._query(self.commands.measure_current)
-        if len(response) >= 15:
-            try:
-                self._state.current_a = float(response[3:14]) * 1e-6
-            except (ValueError, IndexError):
-                self._state.current_a = 0.0
+        value = self._parse_response_value(response)
+        if value is not None:
+            # VBA: Val(Mid(...)) * 1000000 → µA表示。応答値はアンペア単位。
+            self._state.current_a = value
         return self._state.current_a
 
     def output(self, enabled: bool) -> None:
         self._state.output_enabled = enabled
         self._write(self.commands.operate if enabled else self.commands.hold)
+
+    def update_output_voltage(self, voltage_v: float) -> None:
+        """出力中に電位値だけを更新する（MD0・VF は送らない）。"""
+        self._state.voltage_v = voltage_v
+        cmd = f"D {voltage_v}V"
+        self._write(cmd)
 
 
 @dataclass(slots=True)
@@ -421,6 +473,10 @@ class SimulatedR6244Device(BaseDevice):
     def output(self, enabled: bool) -> None:
         self._state.output_enabled = enabled
 
+    def update_output_voltage(self, voltage_v: float) -> None:
+        self._state.voltage_v = voltage_v
+        self.target_voltage_v = voltage_v
+
 
 def build_device(device_config: dict) -> BaseDevice:
     mode = device_config.get("mode", "simulation")
@@ -457,6 +513,9 @@ class ElectrochemistryController:
 
     def output(self, enabled: bool) -> None:
         self.device.output(enabled)
+
+    def update_output_voltage(self, voltage_v: float) -> None:
+        self.device.update_output_voltage(voltage_v)
 
 
 def within_limits(voltage_v: float, current_a: float, voltage_limit_v: float, current_limit_a: float) -> bool:
@@ -514,7 +573,8 @@ class MeasurementManager:
                     for voltage_v in self._voltage_path(params.scan_start_v, params.scan_stop_v, params.scan_rate_v_per_s, params.sample_interval_s):
                         if self._stop_event.is_set():
                             break
-                        self.controller.set_constant_voltage(voltage_v)
+                        # 出力ON中は電位値だけ更新する（MD0/VF の再送を避ける）
+                        self.controller.update_output_voltage(voltage_v)
                         time.sleep(params.sample_interval_s)
                         measured_voltage = self.controller.read_voltage()
                         measured_current = self.controller.read_current()

@@ -71,9 +71,11 @@ class ElectrochemistryApp:
         self.mode_var = tk.StringVar(value=self.config.get("measurement", {}).get("mode", "constant_current"))
         self.sample_interval_var = tk.StringVar(value=str(self.config.get("measurement", {}).get("sample_interval_s", 1.0)))
         self.max_duration_var = tk.StringVar(value=str(self.config.get("measurement", {}).get("max_duration_s", 3600.0)))
-        self.current_var = tk.StringVar(value=str(self.config.get("measurement", {}).get("current_a", 0.01)))
+        # GUI では mA 単位で入力。config の current_a（A）から変換して表示。
+        self.current_var = tk.StringVar(value=str(self.config.get("measurement", {}).get("current_a", 0.01) * 1000))
         self.voltage_var = tk.StringVar(value=str(self.config.get("measurement", {}).get("voltage_v", 1.0)))
-        self.current_limit_var = tk.StringVar(value=str(self.config.get("measurement", {}).get("current_limit_a", 1.0)))
+        # 電流リミットも mA 単位で入力。
+        self.current_limit_var = tk.StringVar(value=str(self.config.get("measurement", {}).get("current_limit_a", 1.0) * 1000))
         self.voltage_limit_var = tk.StringVar(value=str(self.config.get("measurement", {}).get("voltage_limit_v", 10.0)))
         self.scan_start_var = tk.StringVar(value=str(self.config.get("measurement", {}).get("scan_start_v", -1.0)))
         self.scan_stop_var = tk.StringVar(value=str(self.config.get("measurement", {}).get("scan_stop_v", 1.0)))
@@ -90,9 +92,9 @@ class ElectrochemistryApp:
             ("Mode", self.mode_var),
             ("Sample interval (s)", self.sample_interval_var),
             ("Max duration (s)", self.max_duration_var),
-            ("Current (A)", self.current_var),
+            ("Current (mA)", self.current_var),
             ("Voltage (V)", self.voltage_var),
-            ("Current limit (A)", self.current_limit_var),
+            ("Current limit (mA)", self.current_limit_var),
             ("Voltage limit (V)", self.voltage_limit_var),
             ("CV start (V)", self.scan_start_var),
             ("CV stop (V)", self.scan_stop_var),
@@ -194,9 +196,9 @@ class ElectrochemistryApp:
             mode=MeasurementMode(self.mode_var.get()),
             sample_interval_s=float(self.sample_interval_var.get()),
                 max_duration_s=float(self.max_duration_var.get()),
-            current_a=float(self.current_var.get()),
+            current_a=float(self.current_var.get()) / 1000,  # mA → A
             voltage_v=float(self.voltage_var.get()),
-            current_limit_a=float(self.current_limit_var.get()),
+            current_limit_a=float(self.current_limit_var.get()) / 1000,  # mA → A
             voltage_limit_v=float(self.voltage_limit_var.get()),
             scan_start_v=float(self.scan_start_var.get()),
             scan_stop_v=float(self.scan_stop_var.get()),

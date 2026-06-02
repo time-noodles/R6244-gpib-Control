@@ -1,6 +1,6 @@
 {
   "device": {
-    "mode": "real",
+    "mode": "gpib",
     "resource_name": "GPIB::19",
     "timeout_ms": 5000,
     "commands": {
@@ -8,8 +8,6 @@
       "dc_operation": "MD0",
       "constant_voltage_mode": "VF",
       "constant_current_mode": "IF",
-      "set_current": "D{value}UA",
-      "set_voltage": "D{value}V",
       "operate": "E",
       "hold": "H",
       "measure_current": "F2",
