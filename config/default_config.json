@@ -28,7 +28,10 @@
     "mass_g": 1.0,
     "formula": "LiFePO4",
     "electrons": 1,
-    "charge_efficiency": 1.0
+    "charge_efficiency": 1.0,
+    "mode": "constant_current",
+    "stop_condition": "charge_computed",
+    "target_charge_manual": 0.0
   },
   "ui": {
     "window_title": "Electrochemistry Control App - R6244"

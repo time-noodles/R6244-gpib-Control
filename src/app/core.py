@@ -52,6 +52,9 @@ class MeasurementParameters:
     electrons: int = 1
     charge_efficiency: float = 1.0
     target_charge_c: float = 0.0
+    # stop_on_charge=True のとき CC モードで target_charge_c に達したら自動停止する。
+    # False にすると max_duration_s のみで停止する（時間停止モード）。
+    stop_on_charge: bool = True
 
     @classmethod
     def from_dict(cls, data: dict) -> "MeasurementParameters":
@@ -72,6 +75,7 @@ class MeasurementParameters:
             formula=str(data.get("formula", "LiFePO4")),
             electrons=int(data.get("electrons", 1)),
             charge_efficiency=float(data.get("charge_efficiency", 1.0)),
+            stop_on_charge=bool(data.get("stop_on_charge", True)),
         )
 
     def compute_target_charge(self) -> float:
@@ -557,7 +561,9 @@ class MeasurementManager:
         accumulated_charge = 0.0
         try:
             if params.mode == MeasurementMode.CONSTANT_CURRENT:
-                params.compute_target_charge()
+                # stop_on_charge=True の場合のみ電気量から目標値を計算する
+                if params.stop_on_charge and params.target_charge_c <= 0:
+                    params.compute_target_charge()
                 self.controller.set_constant_current(params.current_a)
             elif params.mode == MeasurementMode.CONSTANT_VOLTAGE:
                 self.controller.set_constant_voltage(params.voltage_v)
@@ -602,7 +608,10 @@ class MeasurementManager:
                     self._emit("point", point=point)
                     if not within_limits(measured_voltage, measured_current, params.voltage_limit_v, params.current_limit_a):
                         raise RuntimeError("安全制限を超えました")
-                    if params.mode == MeasurementMode.CONSTANT_CURRENT and accumulated_charge >= params.target_charge_c:
+                    if (params.mode == MeasurementMode.CONSTANT_CURRENT
+                            and params.stop_on_charge
+                            and params.target_charge_c > 0
+                            and accumulated_charge >= params.target_charge_c):
                         self.result.finished_reason = "target_charge"
                         self._emit("finished", reason="target_charge")
                         break
