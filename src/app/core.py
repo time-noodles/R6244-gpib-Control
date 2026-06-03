@@ -593,6 +593,10 @@ class MeasurementManager:
                             raise RuntimeError("安全制限を超えました")
                     if self._stop_event.is_set():
                         break
+                # CV ループ正常完了（ユーザー停止でない場合）
+                if not self._stop_event.is_set():
+                    self.result.finished_reason = "completed"
+                    self._emit("finished", reason="completed")
             else:
                 while not self._stop_event.is_set():
                     time.sleep(params.sample_interval_s)
@@ -648,12 +652,34 @@ class MeasurementManager:
                 voltage += step
 
 
-def save_measurement_csv(path: Path, result: MeasurementResult) -> None:
+def save_measurement_csv(
+    path: Path,
+    result: MeasurementResult,
+    metadata: dict | None = None,
+) -> None:
+    """CSVにデータとメタデータを保存する。
+
+    metadata には測定条件や日時などを渡す。
+    CSV 先頭に ``# key: value`` 形式でコメント行として書き込まれる。
+    """
     import csv
+    from datetime import datetime
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
+
+        # メタデータヘッダ
+        writer.writerow(["# Electrochemistry R6244 Measurement Log"])
+        writer.writerow([f"# Saved: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"])
+        if metadata:
+            for key, value in metadata.items():
+                writer.writerow([f"# {key}: {value}"])
+        writer.writerow([f"# Points: {len(result.time_s)}"])
+        writer.writerow([f"# Finished reason: {result.finished_reason}"])
+        writer.writerow([""])  # 空行
+
+        # データ
         writer.writerow(["time_s", "voltage_v", "current_a", "charge_c"])
         for row in zip(result.time_s, result.voltage_v, result.current_a, result.charge_c):
             writer.writerow(row)

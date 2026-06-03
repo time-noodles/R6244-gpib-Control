@@ -78,7 +78,7 @@ class ElectrochemistryApp:
     # モードごとに表示するパラメータキーセット
     _MODE_PARAMS: dict[MeasurementMode, set[str]] = {
         MeasurementMode.CONSTANT_CURRENT: {
-            "sample_interval", "max_duration", "current", "current_limit",
+            "sample_interval", "max_duration", "current", "current_limit", "voltage_limit",
         },
         MeasurementMode.CONSTANT_VOLTAGE: {
             "sample_interval", "max_duration", "voltage", "current_limit", "voltage_limit",
@@ -180,6 +180,8 @@ class ElectrochemistryApp:
         self.target_charge_display_var = tk.StringVar(value="─")
         self.target_charge_manual_var = tk.StringVar(value=str(cfg.get("target_charge_manual", 0)))
         self.stop_condition_var = tk.StringVar(value=cfg.get("stop_condition", StopCondition.CHARGE_COMPUTED.value))
+        # Max duration の単位（s / min / h）
+        self.max_duration_unit_var = tk.StringVar(value=cfg.get("max_duration_unit", "s"))
 
         # ウィジェット格納 dict  key -> [label_or_frame, entry_or_label]
         self._param_rows: dict[str, list[tk.Widget]] = {}
@@ -222,9 +224,18 @@ class ElectrochemistryApp:
             ).pack(anchor="w")
         r[0] += 1
 
-        # ── 共通パラメータ行 ──────────────────────────────────────────────────
+        # ── 共通パラメータ行 ────────────────────────────────────────────
         add_row("sample_interval", "Sample interval (s)", entry(self.sample_interval_var))
-        add_row("max_duration",    "Max duration (s)",    entry(self.max_duration_var))
+
+        # Max duration → 入力欄 + 単位セレクタの複合ウィジェット行
+        dur_frame = ttk.Frame(g)
+        ttk.Entry(dur_frame, textvariable=self.max_duration_var, width=8).pack(side="left")
+        ttk.Combobox(
+            dur_frame, textvariable=self.max_duration_unit_var,
+            values=["s", "min", "h"], state="readonly", width=5,
+        ).pack(side="left", padx=(4, 0))
+        add_row("max_duration", "Max duration", dur_frame)
+
         add_row("current",         "Current (mA)",        entry(self.current_var))
         add_row("voltage",         "Voltage (V)",         entry(self.voltage_var))
         add_row("current_limit",   "Current limit (mA)",  entry(self.current_limit_var))
@@ -404,7 +415,7 @@ class ElectrochemistryApp:
         params = MeasurementParameters(
             mode=mode,
             sample_interval_s=float(self.sample_interval_var.get()),
-            max_duration_s=float(self.max_duration_var.get()),
+            max_duration_s=self._max_duration_s(),    # 単位変換して秒に
             current_a=float(self.current_var.get()) / 1000,       # mA → A
             voltage_v=float(self.voltage_var.get()),
             current_limit_a=float(self.current_limit_var.get()) / 1000,  # mA → A
@@ -450,6 +461,50 @@ class ElectrochemistryApp:
 
     # ── CSV save ───────────────────────────────────────────────────────────────
 
+    def _max_duration_s(self) -> float:
+        """入力値と単位セレクタから Max duration (秒) を返す。"""
+        val = float(self.max_duration_var.get())
+        factor = {"s": 1.0, "min": 60.0, "h": 3600.0}.get(self.max_duration_unit_var.get(), 1.0)
+        return val * factor
+
+    def _build_csv_metadata(self) -> dict:
+        """測定条件のメタデータ辞書を構築する（CSV ヘッダ用）。"""
+        mode = self.mode_var.get()
+        meta: dict = {
+            "Mode": mode,
+            "Sample interval": f"{self.sample_interval_var.get()} s",
+            "Max duration": (
+                f"{self.max_duration_var.get()} {self.max_duration_unit_var.get()}"
+                f" ({self._max_duration_s():.1f} s)"
+            ),
+        }
+        if mode == MeasurementMode.CONSTANT_CURRENT.value:
+            meta["Current"] = f"{self.current_var.get()} mA"
+            meta["Current limit"] = f"{self.current_limit_var.get()} mA"
+            meta["Voltage limit"] = f"{self.voltage_limit_var.get()} V"
+            meta["Stop condition"] = self.stop_condition_var.get()
+            sc = StopCondition(self.stop_condition_var.get())
+            if sc == StopCondition.CHARGE_COMPUTED:
+                meta["Formula"] = self.formula_var.get()
+                meta["Mass"] = f"{self.mass_var.get()} g"
+                meta["Electrons"] = self.electrons_var.get()
+                meta["Efficiency"] = self.efficiency_var.get()
+                meta["Target charge"] = self.target_charge_display_var.get()
+            elif sc == StopCondition.CHARGE_MANUAL:
+                meta["Target charge (manual)"] = f"{self.target_charge_manual_var.get()} C"
+        elif mode == MeasurementMode.CONSTANT_VOLTAGE.value:
+            meta["Voltage"] = f"{self.voltage_var.get()} V"
+            meta["Current limit"] = f"{self.current_limit_var.get()} mA"
+            meta["Voltage limit"] = f"{self.voltage_limit_var.get()} V"
+        elif mode == MeasurementMode.CV.value:
+            meta["CV start"] = f"{self.scan_start_var.get()} V"
+            meta["CV stop"] = f"{self.scan_stop_var.get()} V"
+            meta["CV rate"] = f"{self.scan_rate_var.get()} V/s"
+            meta["CV cycles"] = self.cycles_var.get()
+            meta["Current limit"] = f"{self.current_limit_var.get()} mA"
+            meta["Voltage limit"] = f"{self.voltage_limit_var.get()} V"
+        return meta
+
     def save_csv(self) -> None:
         if self.manager is None or not self.manager.result.time_s:
             messagebox.showinfo("保存", "保存するデータがありません")
@@ -462,7 +517,9 @@ class ElectrochemistryApp:
         if not path_str:
             return
         try:
-            save_measurement_csv(Path(path_str), self.manager.result)
+            save_measurement_csv(
+                Path(path_str), self.manager.result, metadata=self._build_csv_metadata()
+            )
             messagebox.showinfo("保存完了", f"保存しました:\n{path_str}")
         except Exception as exc:
             messagebox.showerror("保存エラー", str(exc))
@@ -618,8 +675,9 @@ class ElectrochemistryApp:
             cfg["formula"]           = self.formula_var.get()
             cfg["electrons"]         = int(float(self.electrons_var.get()))
             cfg["charge_efficiency"] = float(self.efficiency_var.get())
-            cfg["stop_condition"]    = self.stop_condition_var.get()
-            cfg["target_charge_manual"] = float(self.target_charge_manual_var.get())
+            cfg["stop_condition"]       = self.stop_condition_var.get()
+            cfg["target_charge_manual"]  = float(self.target_charge_manual_var.get())
+            cfg["max_duration_unit"]     = self.max_duration_unit_var.get()
         except (ValueError, tk.TclError):
             pass  # 入力値の変換失敗は無視
 
