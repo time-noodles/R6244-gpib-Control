@@ -49,7 +49,7 @@ def debug_commands():
         print("=" * 60)
         current_a = 0.01
         print(f"\nSetting current to {current_a} A:")
-        controller.set_constant_current(current_a)
+        controller.set_constant_current(current_a, 10.0)
         
         # Test 2: Constant Voltage  
         print("\n" + "=" * 60)
@@ -57,7 +57,7 @@ def debug_commands():
         print("=" * 60)
         voltage_v = 1.0
         print(f"\nSetting voltage to {voltage_v} V:")
-        controller.set_constant_voltage(voltage_v)
+        controller.set_constant_voltage(voltage_v, 0.01)
         
         # Test 3: Output ON
         print("\n" + "=" * 60)

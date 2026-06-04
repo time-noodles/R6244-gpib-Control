@@ -271,11 +271,11 @@ class BaseDevice(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def set_constant_current(self, current_a: float) -> None:
+    def set_constant_current(self, current_a: float, voltage_limit_v: float) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def set_constant_voltage(self, voltage_v: float) -> None:
+    def set_constant_voltage(self, voltage_v: float, current_limit_a: float) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -390,11 +390,13 @@ class R6244Device(BaseDevice):
             print(f"[RESP] {repr(response)}")
         return response
 
-    def set_constant_current(self, current_a: float) -> None:
+    def set_constant_current(self, current_a: float, voltage_limit_v: float) -> None:
         self._state.mode = "constant_current"
         self._state.current_a = current_a
         self._write(self.commands.dc_operation)
         self._write(self.commands.constant_current_mode)
+        # 電圧リミッタ設定
+        self._write(f"VL{voltage_limit_v}")
         # R6244 電流コマンドは UA（マイクロアンペア）単位。
         # VBA: DCI = Int(DCI_ua * 100) / 100  → 0.01 µA 精度に切り捨て
         # VBA: Str() は正の数に先頭スペースを付けるが、整数は小数点なし。
@@ -412,11 +414,13 @@ class R6244Device(BaseDevice):
             v_cmd = "VRN0"
         self._write(v_cmd)
 
-    def set_constant_voltage(self, voltage_v: float) -> None:
+    def set_constant_voltage(self, voltage_v: float, current_limit_a: float) -> None:
         self._state.mode = "constant_voltage"
         self._state.voltage_v = voltage_v
         self._write(self.commands.dc_operation)
         self._write(self.commands.constant_voltage_mode)
+        # 電流リミッタ設定
+        self._write(f"IL{current_limit_a}")
         # VBA Str() emulation: prepend space before number
         cmd = f"D {voltage_v}V"
         self._write(cmd)
@@ -518,11 +522,11 @@ class SimulatedR6244Device(BaseDevice):
     def identify(self) -> str:
         return "SIMULATED R6244"
 
-    def set_constant_current(self, current_a: float) -> None:
+    def set_constant_current(self, current_a: float, voltage_limit_v: float) -> None:
         self._state.mode = "constant_current"
         self.target_current_a = current_a
 
-    def set_constant_voltage(self, voltage_v: float) -> None:
+    def set_constant_voltage(self, voltage_v: float, current_limit_a: float) -> None:
         self._state.mode = "constant_voltage"
         self.target_voltage_v = voltage_v
 
@@ -576,11 +580,11 @@ class ElectrochemistryController:
     def identify(self) -> str:
         return self.device.identify()
 
-    def set_constant_current(self, current_a: float) -> None:
-        self.device.set_constant_current(current_a)
+    def set_constant_current(self, current_a: float, voltage_limit_v: float) -> None:
+        self.device.set_constant_current(current_a, voltage_limit_v)
 
-    def set_constant_voltage(self, voltage_v: float) -> None:
-        self.device.set_constant_voltage(voltage_v)
+    def set_constant_voltage(self, voltage_v: float, current_limit_a: float) -> None:
+        self.device.set_constant_voltage(voltage_v, current_limit_a)
 
     def read_voltage(self) -> float:
         return self.device.read_voltage()
@@ -644,11 +648,11 @@ class MeasurementManager:
                 # stop_on_charge=True の場合のみ電気量から目標値を計算する
                 if params.stop_on_charge and params.target_charge_c <= 0:
                     params.compute_target_charge()
-                self.controller.set_constant_current(params.current_a)
+                self.controller.set_constant_current(params.current_a, params.voltage_limit_v)
             elif params.mode == MeasurementMode.CONSTANT_VOLTAGE:
-                self.controller.set_constant_voltage(params.voltage_v)
+                self.controller.set_constant_voltage(params.voltage_v, params.current_limit_a)
             elif params.mode == MeasurementMode.CV:
-                self.controller.set_constant_voltage(params.scan_start_v)
+                self.controller.set_constant_voltage(params.scan_start_v, params.current_limit_a)
             else:
                 raise ValueError(f"未対応のモードです: {params.mode}")
 

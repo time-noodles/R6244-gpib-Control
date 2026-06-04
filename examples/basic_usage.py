@@ -44,7 +44,7 @@ def example_constant_current(resource_name="GPIB::19"):
     try:
         # Set constant current mode
         current_a = 0.001  # 1 mA
-        controller.set_constant_current(current_a)
+        controller.set_constant_current(current_a, 10.0)
         print(f"✓ Set constant current: {current_a} A")
         
         # Enable output
@@ -90,7 +90,7 @@ def example_constant_voltage(resource_name="GPIB::19"):
     try:
         # Set constant voltage mode
         voltage_v = 1.0  # 1 V
-        controller.set_constant_voltage(voltage_v)
+        controller.set_constant_voltage(voltage_v, 0.01)
         print(f"✓ Set constant voltage: {voltage_v} V")
         
         # Enable output
