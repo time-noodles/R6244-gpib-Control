@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import collections
 import json
 import time
 import tkinter as tk
 from enum import Enum
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+
+import numpy as np
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
@@ -146,6 +149,22 @@ class ElectrochemistryApp:
             row=3, column=0, columnspan=2, sticky="w")
         ttk.Label(frm, textvariable=self.idn_var, foreground="gray").grid(
             row=4, column=0, columnspan=2, sticky="w")
+
+        # ── レンジ設定 ──────────────────────────────────────────────────
+        d = self.config.get("device", {})
+        self.current_range_var = tk.StringVar(value=d.get("current_range_cmd", "AUTO"))
+        self.voltage_range_var = tk.StringVar(value=d.get("voltage_range_cmd", "AUTO"))
+
+        rng_frm = ttk.LabelFrame(frm, text="Measurement Range (optional)", padding=4)
+        rng_frm.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        rng_frm.columnconfigure(1, weight=1)
+
+        ttk.Label(rng_frm, text="Current range cmd").grid(row=0, column=0, sticky="w", padx=(0, 4))
+        ttk.Entry(rng_frm, textvariable=self.current_range_var).grid(row=0, column=1, sticky="ew")
+        ttk.Label(rng_frm, text="Voltage range cmd").grid(row=1, column=0, sticky="w", padx=(0, 4))
+        ttk.Entry(rng_frm, textvariable=self.voltage_range_var).grid(row=1, column=1, sticky="ew")
+        ttk.Label(rng_frm, text="例: IRN 2 / VRN 1 (AUTO または空欄 = 自動設定)",
+                  foreground="gray").grid(row=2, column=0, columnspan=2, sticky="w")
 
     # ── Measurement parameters ─────────────────────────────────────────────────
 
@@ -375,6 +394,10 @@ class ElectrochemistryApp:
         device_config = self.config.setdefault("device", {})
         device_config["mode"] = "simulation" if self.simulation_var.get() else "gpib"
         device_config["resource_name"] = self.resource_var.get().strip()
+        device_config["commands"] = {
+            "current_range_cmd": self.current_range_var.get().strip(),
+            "voltage_range_cmd": self.voltage_range_var.get().strip(),
+        }
         self.controller = ElectrochemistryController(build_device(device_config))
         try:
             state = self.controller.connect(device_config["resource_name"])
@@ -607,9 +630,9 @@ class ElectrochemistryApp:
 
     # ── Event polling & plot ───────────────────────────────────────────────────
 
-    # 1サイクルで描画する最大データ点数（これを超えた分は間引きダウンサンプリング）
+    # グラフの最大描画点数（ダウンサンプリング閾値）
     _MAX_PLOT_POINTS: int = 2000
-    # プロット更新の最小間隔（秒）：これより短い間隔では描画しない
+    # グラフ更新間隔（秒）
     _PLOT_INTERVAL_S: float = 1.0
 
     def _poll_events(self) -> None:
@@ -621,10 +644,8 @@ class ElectrochemistryApp:
                 except Exception:
                     break
                 if event.kind == "point":
-                    # ステータス表示は最新点だけ更新（中間点はスキップ）
                     latest_point = event.payload["point"]
                 else:
-                    # "finished" / "error" / "status" は必ず処理
                     self._handle_nonepoint_event(event.kind, event.payload)
 
             if latest_point is not None:
@@ -656,29 +677,6 @@ class ElectrochemistryApp:
             self._save_btn.config(state="normal")
             messagebox.showerror("測定エラー", msg)
 
-    def _ensure_plot_line(self, mode: str) -> None:
-        """モードに対応した Line2D オブジェクトを初期化する。
-        同じモードなら再利用。変わったときだけ axis.clear() を実行。
-        """
-        if getattr(self, "_plot_mode", None) == mode:
-            return  # 既存の Line2D を再利用→ set_data() だけで済む
-
-        self.axis.clear()
-        self.axis.grid(True, alpha=0.3)
-        if mode == MeasurementMode.CV.value:
-            self.axis.set_xlabel("Voltage (V)")
-            self.axis.set_ylabel("Current (A)")
-            (self._plot_line,) = self.axis.plot([], [], color="#c0392b", linewidth=1.0)
-        elif mode == MeasurementMode.CONSTANT_VOLTAGE.value:
-            self.axis.set_xlabel("Time (s)")
-            self.axis.set_ylabel("Current (A)")
-            (self._plot_line,) = self.axis.plot([], [], color="#2980b9", linewidth=1.0)
-        else:
-            self.axis.set_xlabel("Time (s)")
-            self.axis.set_ylabel("Voltage (V)")
-            (self._plot_line,) = self.axis.plot([], [], color="#16a085", linewidth=1.0)
-        self._plot_mode = mode
-
     def _update_plot(self) -> None:
         if self.manager is None:
             return
@@ -695,18 +693,21 @@ class ElectrochemistryApp:
         v  = result.voltage_v[::step]
         ia = result.current_a[::step]
 
-        # モード変更時のみ clear() する（毎回 clear()+plot() しない）
-        self._ensure_plot_line(mode)
-
+        # ── 描画 ─────────────────────────────────────────────────────────────
+        self.axis.clear()
+        self.axis.grid(True, alpha=0.3)
         if mode == MeasurementMode.CV.value:
-            self._plot_line.set_data(v, ia)
+            self.axis.set_xlabel("Voltage (V)")
+            self.axis.set_ylabel("Current (A)")
+            self.axis.plot(v, ia, color="#c0392b", linewidth=1.0)
         elif mode == MeasurementMode.CONSTANT_VOLTAGE.value:
-            self._plot_line.set_data(t, ia)
+            self.axis.set_xlabel("Time (s)")
+            self.axis.set_ylabel("Current (A)")
+            self.axis.plot(t, ia, color="#2980b9", linewidth=1.0)
         else:
-            self._plot_line.set_data(t, v)
-
-        self.axis.relim()
-        self.axis.autoscale_view()
+            self.axis.set_xlabel("Time (s)")
+            self.axis.set_ylabel("Voltage (V)")
+            self.axis.plot(t, v, color="#16a085", linewidth=1.0)
         self.canvas.draw_idle()
 
     def _save_params_to_config(self) -> None:
@@ -733,6 +734,13 @@ class ElectrochemistryApp:
             cfg["max_duration_unit"]     = self.max_duration_unit_var.get()
         except (ValueError, tk.TclError):
             pass  # 入力値の変換失敗は無視
+
+        # デバイス設定も保存
+        dev_cfg = self.config.setdefault("device", {})
+        dev_cfg["resource_name"] = self.resource_var.get().strip()
+        dev_cfg["mode"] = "simulation" if self.simulation_var.get() else "gpib"
+        dev_cfg["current_range_cmd"] = self.current_range_var.get().strip()
+        dev_cfg["voltage_range_cmd"] = self.voltage_range_var.get().strip()
 
     def close(self) -> None:
         try:

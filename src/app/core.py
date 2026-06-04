@@ -111,16 +111,24 @@ class MeasurementResult:
         self.current_a.append(point.current_a)
         self.charge_c.append(point.charge_c)
 
+    def safe_n(self) -> int:
+        """4リストの最小長を返す（GUI スレッドがスレッドセーフに使える点数）。
+
+        Python の GIL 下では len() はアトミックなので、
+        この値以内で各リストにアクセスすれば範囲外エラーは起きない。
+        全データをコピーしないため、何時間動かしてもメモリを圧迫しない。
+        """
+        return min(len(self.time_s), len(self.voltage_v),
+                   len(self.current_a), len(self.charge_c))
+
     def snapshot(self) -> "MeasurementResult":
         """GUIスレッドが安全に読めるスナップショットを返す。
 
-        4つのリストを同じ長さで切り冗して返す。
+        4つのリストを同じ長さで切り詰めて返す。
         Python の GIL の下でリストの len()・slice はアトミックなので
         このアプローチで競合状態を安全に回避できる。
         """
-        # 最小長で割り冗して全リストの長さを揃える
-        n = min(len(self.time_s), len(self.voltage_v),
-                len(self.current_a), len(self.charge_c))
+        n = self.safe_n()
         snap = MeasurementResult(mode=self.mode, finished_reason=self.finished_reason)
         snap.time_s   = self.time_s[:n]
         snap.voltage_v = self.voltage_v[:n]
@@ -309,6 +317,11 @@ class R6244Commands:
     hold: str = "H"
     measure_current: str = "F2"
     measure_voltage: str = "F1"
+    # 測定レンジコマンド（空文字列 = 送信しない / デバイスデフォルト使用）
+    # CV ・定電位模式では電流測定レンジを適切に設定することで量子化を解消できる。
+    # R6244 のコマンド例: 電流レンジ → “IRN 2”, 電位レンジ → “VRN 1”
+    current_range_cmd: str = ""
+    voltage_range_cmd: str = ""
 
 
 @dataclass(slots=True)
@@ -388,6 +401,11 @@ class R6244Device(BaseDevice):
             num_str = str(current_ua_truncated)       # 例: "10000.5"
         cmd = f"D {num_str}UA"  # 先頭スペース = VBA Str() の正数フォーマット
         self._write(cmd)
+        # 電位測定レンジ（定電流模式では電位を測定）
+        v_cmd = self.commands.voltage_range_cmd.strip()
+        if not v_cmd or v_cmd.upper() == "AUTO":
+            v_cmd = "VRN 0"
+        self._write(v_cmd)
 
     def set_constant_voltage(self, voltage_v: float) -> None:
         self._state.mode = "constant_voltage"
@@ -397,6 +415,11 @@ class R6244Device(BaseDevice):
         # VBA Str() emulation: prepend space before number
         cmd = f"D {voltage_v}V"
         self._write(cmd)
+        # 電流測定レンジ（定電位/CV 模式では電流を測定）
+        i_cmd = self.commands.current_range_cmd.strip()
+        if not i_cmd or i_cmd.upper() == "AUTO":
+            i_cmd = "IRN 0"
+        self._write(i_cmd)
 
     # R6244 応答から数値を抽出する共通関数。
     # VBA: Mid(response, 4, 11) → 3文字ヘッダの後に数値。
