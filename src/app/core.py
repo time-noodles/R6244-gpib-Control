@@ -300,6 +300,11 @@ class BaseDevice(ABC):
         """出力中に電流値だけを更新する（モード初期化コマンドは送らない）。"""
         raise NotImplementedError
 
+    @abstractmethod
+    def write_raw_command(self, cmd: str) -> None:
+        """デバイスに直接コマンドを書き込む。"""
+        raise NotImplementedError
+
 
 try:
     import pyvisa
@@ -404,7 +409,7 @@ class R6244Device(BaseDevice):
         # 電位測定レンジ（定電流模式では電位を測定）
         v_cmd = self.commands.voltage_range_cmd.strip()
         if not v_cmd or v_cmd.upper() == "AUTO":
-            v_cmd = "VRN 0"
+            v_cmd = "VRN0"
         self._write(v_cmd)
 
     def set_constant_voltage(self, voltage_v: float) -> None:
@@ -418,7 +423,7 @@ class R6244Device(BaseDevice):
         # 電流測定レンジ（定電位/CV 模式では電流を測定）
         i_cmd = self.commands.current_range_cmd.strip()
         if not i_cmd or i_cmd.upper() == "AUTO":
-            i_cmd = "IRN 0"
+            i_cmd = "IRN0"
         self._write(i_cmd)
 
     # R6244 応答から数値を抽出する共通関数。
@@ -484,6 +489,10 @@ class R6244Device(BaseDevice):
         cmd = f"D {num_str}UA"
         self._write(cmd)
 
+    def write_raw_command(self, cmd: str) -> None:
+        if cmd:
+            self._write(cmd)
+
 
 @dataclass(slots=True)
 class SimulatedR6244Device(BaseDevice):
@@ -542,6 +551,9 @@ class SimulatedR6244Device(BaseDevice):
         self._state.current_a = current_a
         self.target_current_a = current_a
 
+    def write_raw_command(self, cmd: str) -> None:
+        pass
+
 
 def build_device(device_config: dict) -> BaseDevice:
     mode = device_config.get("mode", "simulation")
@@ -584,6 +596,9 @@ class ElectrochemistryController:
 
     def update_output_current(self, current_a: float) -> None:
         self.device.update_output_current(current_a)
+
+    def write_raw_command(self, cmd: str) -> None:
+        self.device.write_raw_command(cmd)
 
 
 def within_limits(voltage_v: float, current_a: float, voltage_limit_v: float, current_limit_a: float) -> bool:
@@ -638,6 +653,20 @@ class MeasurementManager:
                 raise ValueError(f"未対応のモードです: {params.mode}")
 
             self.controller.output(True)
+
+            # Auto range or custom range commands sent right after output is turned ON (E is sent) to ensure they are active
+            device = self.controller.device
+            if hasattr(device, "commands"):
+                if params.mode == MeasurementMode.CONSTANT_CURRENT:
+                    v_cmd = getattr(device.commands, "voltage_range_cmd", "").strip()
+                    if not v_cmd or v_cmd.upper() == "AUTO":
+                        v_cmd = "VRN0"
+                    self.controller.write_raw_command(v_cmd)
+                else:
+                    i_cmd = getattr(device.commands, "current_range_cmd", "").strip()
+                    if not i_cmd or i_cmd.upper() == "AUTO":
+                        i_cmd = "IRN0"
+                    self.controller.write_raw_command(i_cmd)
 
             if params.mode == MeasurementMode.CV:
                 for _ in range(max(1, params.cycles)):
