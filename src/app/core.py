@@ -650,6 +650,8 @@ class MeasurementManager:
                     params.compute_target_charge()
                 self.controller.set_constant_current(params.current_a, params.voltage_limit_v)
             elif params.mode == MeasurementMode.CONSTANT_VOLTAGE:
+                if params.stop_on_charge and params.target_charge_c <= 0:
+                    params.compute_target_charge()
                 self.controller.set_constant_voltage(params.voltage_v, params.current_limit_a)
             elif params.mode == MeasurementMode.CV:
                 self.controller.set_constant_voltage(params.scan_start_v, params.current_limit_a)
@@ -710,7 +712,7 @@ class MeasurementManager:
                     self._emit("point", point=point)
                     if not within_limits(measured_voltage, measured_current, params.voltage_limit_v, params.current_limit_a):
                         raise RuntimeError("安全制限を超えました")
-                    if (params.mode == MeasurementMode.CONSTANT_CURRENT
+                    if ((params.mode == MeasurementMode.CONSTANT_CURRENT or params.mode == MeasurementMode.CONSTANT_VOLTAGE)
                             and params.stop_on_charge
                             and params.target_charge_c > 0
                             and accumulated_charge >= params.target_charge_c):

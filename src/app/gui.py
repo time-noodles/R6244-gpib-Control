@@ -357,15 +357,15 @@ class ElectrochemistryApp:
         for key in all_general:
             self._set_row_visible(key, key in visible)
 
-        is_cc = (mode == MeasurementMode.CONSTANT_CURRENT)
-        self._set_row_visible("stop_condition", is_cc)
+        has_stop_cond = (mode in (MeasurementMode.CONSTANT_CURRENT, MeasurementMode.CONSTANT_VOLTAGE))
+        self._set_row_visible("stop_condition", has_stop_cond)
 
-        if is_cc:
+        if has_stop_cond:
             self._calc_btn.grid()
         else:
             self._calc_btn.grid_remove()
 
-        # CC 専用フィールドは stop_condition に依存
+        # 停止条件に応じた表示切り替え
         self.on_stop_condition_change()
 
     def on_stop_condition_change(self, *_args) -> None:
@@ -374,7 +374,7 @@ class ElectrochemistryApp:
         except ValueError:
             return
 
-        if mode != MeasurementMode.CONSTANT_CURRENT:
+        if mode not in (MeasurementMode.CONSTANT_CURRENT, MeasurementMode.CONSTANT_VOLTAGE):
             for key in ("mass", "formula", "electrons", "efficiency",
                         "target_charge_display", "target_charge_manual"):
                 self._set_row_visible(key, False)
@@ -434,7 +434,7 @@ class ElectrochemistryApp:
     def build_parameters(self) -> MeasurementParameters:
         mode = MeasurementMode(self.mode_var.get())
         sc = StopCondition(self.stop_condition_var.get())
-        stop_on_charge = (mode == MeasurementMode.CONSTANT_CURRENT and sc != StopCondition.TIME)
+        stop_on_charge = (mode in (MeasurementMode.CONSTANT_CURRENT, MeasurementMode.CONSTANT_VOLTAGE) and sc != StopCondition.TIME)
 
         params = MeasurementParameters(
             mode=mode,
@@ -455,7 +455,7 @@ class ElectrochemistryApp:
             stop_on_charge=stop_on_charge,
         )
 
-        if mode == MeasurementMode.CONSTANT_CURRENT:
+        if mode in (MeasurementMode.CONSTANT_CURRENT, MeasurementMode.CONSTANT_VOLTAGE):
             if sc == StopCondition.CHARGE_COMPUTED:
                 params.compute_target_charge()
             elif sc == StopCondition.CHARGE_MANUAL:
