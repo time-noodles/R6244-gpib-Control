@@ -374,18 +374,32 @@ class R6244Device(BaseDevice):
             return "SIMULATED"
         return "R6244 Device"
 
+    def _log_gpib(self, direction: str, text: str) -> None:
+        from datetime import datetime
+        import pathlib
+        try:
+            log_dir = pathlib.Path(__file__).resolve().parent.parent.parent
+            log_path = log_dir / "gpib_communication.log"
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} {direction} {repr(text)}\n")
+        except Exception as e:
+            print(f"[LOG ERROR] {e}")
+
     def _write(self, text: str) -> None:
+        self._log_gpib("[SEND]", text)
         if self.debug_mode:
             print(f"[SEND] {repr(text)}")
         if self._resource is not None:
             self._resource.write(text)
 
     def _query(self, text: str) -> str:
+        self._log_gpib("[QUERY]", text)
         if self.debug_mode:
             print(f"[QUERY] {repr(text)}")
         if self._resource is None:
             return ""
         response = str(self._resource.query(text)).strip()
+        self._log_gpib("[RESP]", response)
         if self.debug_mode:
             print(f"[RESP] {repr(response)}")
         return response
@@ -395,8 +409,30 @@ class R6244Device(BaseDevice):
         self._state.current_a = current_a
         self._write(self.commands.dc_operation)
         self._write(self.commands.constant_current_mode)
-        # 電圧リミッタ設定
-        self._write(f"VL{voltage_limit_v}")
+        
+        # Send voltage compliance limit (using compatibility syntax)
+        self._write(f"D {voltage_limit_v}V")
+
+        # Current range configuration
+        if self.commands.current_range_cmd:
+            cmd_str = self.commands.current_range_cmd.strip().upper()
+            if cmd_str == "AUTO":
+                self._write("F2")
+                self._write("R0")
+            elif cmd_str:
+                self._write("F2")
+                self._write(cmd_str)
+
+        # Voltage range configuration
+        if self.commands.voltage_range_cmd:
+            cmd_str = self.commands.voltage_range_cmd.strip().upper()
+            if cmd_str == "AUTO":
+                self._write("F1")
+                self._write("R0")
+            elif cmd_str:
+                self._write("F1")
+                self._write(cmd_str)
+
         # R6244 電流コマンドは UA（マイクロアンペア）単位。
         # VBA: DCI = Int(DCI_ua * 100) / 100  → 0.01 µA 精度に切り捨て
         # VBA: Str() は正の数に先頭スペースを付けるが、整数は小数点なし。
@@ -408,27 +444,39 @@ class R6244Device(BaseDevice):
             num_str = str(current_ua_truncated)       # 例: "10000.5"
         cmd = f"D {num_str}UA"  # 先頭スペース = VBA Str() の正数フォーマット
         self._write(cmd)
-        # 電位測定レンジ（定電流模式では電位を測定）
-        v_cmd = self.commands.voltage_range_cmd.strip()
-        if not v_cmd or v_cmd.upper() == "AUTO":
-            v_cmd = "VRN0"
-        self._write(v_cmd)
 
     def set_constant_voltage(self, voltage_v: float, current_limit_a: float) -> None:
         self._state.mode = "constant_voltage"
         self._state.voltage_v = voltage_v
         self._write(self.commands.dc_operation)
         self._write(self.commands.constant_voltage_mode)
-        # 電流リミッタ設定
-        self._write(f"IL{current_limit_a}")
+
+        # Send current compliance limit (using compatibility syntax)
+        self._write(f"D {current_limit_a}A")
+
+        # Current range configuration
+        if self.commands.current_range_cmd:
+            cmd_str = self.commands.current_range_cmd.strip().upper()
+            if cmd_str == "AUTO":
+                self._write("F2")
+                self._write("R0")
+            elif cmd_str:
+                self._write("F2")
+                self._write(cmd_str)
+
+        # Voltage range configuration
+        if self.commands.voltage_range_cmd:
+            cmd_str = self.commands.voltage_range_cmd.strip().upper()
+            if cmd_str == "AUTO":
+                self._write("F1")
+                self._write("R0")
+            elif cmd_str:
+                self._write("F1")
+                self._write(cmd_str)
+
         # VBA Str() emulation: prepend space before number
         cmd = f"D {voltage_v}V"
         self._write(cmd)
-        # 電流測定レンジ（定電位/CV 模式では電流を測定）
-        i_cmd = self.commands.current_range_cmd.strip()
-        if not i_cmd or i_cmd.upper() == "AUTO":
-            i_cmd = "IRN0"
-        self._write(i_cmd)
 
     # R6244 応答から数値を抽出する共通関数。
     # VBA: Mid(response, 4, 11) → 3文字ヘッダの後に数値。
@@ -460,15 +508,20 @@ class R6244Device(BaseDevice):
         response = self._query(self.commands.measure_voltage)
         value = self._parse_response_value(response)
         if value is not None:
-            self._state.voltage_v = value
+            if abs(value) <= 25.0:
+                self._state.voltage_v = value
+            else:
+                print(f"[WARNING] 無効な電圧測定値を無視しました: {value}")
         return self._state.voltage_v
 
     def read_current(self) -> float:
         response = self._query(self.commands.measure_current)
         value = self._parse_response_value(response)
         if value is not None:
-            # VBA: Val(Mid(...)) * 1000000 → µA表示。応答値はアンペア単位。
-            self._state.current_a = value
+            if abs(value) <= 12.0:
+                self._state.current_a = value
+            else:
+                print(f"[WARNING] 無効な電流測定値を無視しました: {value}")
         return self._state.current_a
 
     def output(self, enabled: bool) -> None:
@@ -643,6 +696,7 @@ class MeasurementManager:
     def _run(self, params: MeasurementParameters) -> None:
         start_time = time.monotonic()
         accumulated_charge = 0.0
+        out_of_limit_count = 0
         try:
             if params.mode == MeasurementMode.CONSTANT_CURRENT:
                 # stop_on_charge=True の場合のみ電気量から目標値を計算する
@@ -660,20 +714,6 @@ class MeasurementManager:
 
             self.controller.output(True)
 
-            # Auto range or custom range commands sent right after output is turned ON (E is sent) to ensure they are active
-            device = self.controller.device
-            if hasattr(device, "commands"):
-                if params.mode == MeasurementMode.CONSTANT_CURRENT:
-                    v_cmd = getattr(device.commands, "voltage_range_cmd", "").strip()
-                    if not v_cmd or v_cmd.upper() == "AUTO":
-                        v_cmd = "VRN0"
-                    self.controller.write_raw_command(v_cmd)
-                else:
-                    i_cmd = getattr(device.commands, "current_range_cmd", "").strip()
-                    if not i_cmd or i_cmd.upper() == "AUTO":
-                        i_cmd = "IRN0"
-                    self.controller.write_raw_command(i_cmd)
-
             if params.mode == MeasurementMode.CV:
                 for _ in range(max(1, params.cycles)):
                     for voltage_v in self._voltage_path(params.scan_start_v, params.scan_stop_v, params.scan_rate_v_per_s, params.sample_interval_s):
@@ -690,7 +730,11 @@ class MeasurementManager:
                         self.result.append(point)
                         self._emit("point", point=point)
                         if not within_limits(measured_voltage, measured_current, params.voltage_limit_v, params.current_limit_a):
-                            raise RuntimeError("安全制限を超えました")
+                            out_of_limit_count += 1
+                            if out_of_limit_count >= 3:
+                                raise RuntimeError("安全制限を連続して超えました")
+                        else:
+                            out_of_limit_count = 0
                     if self._stop_event.is_set():
                         break
                 # CV ループ正常完了（ユーザー停止でない場合）
@@ -711,7 +755,11 @@ class MeasurementManager:
                     self.result.append(point)
                     self._emit("point", point=point)
                     if not within_limits(measured_voltage, measured_current, params.voltage_limit_v, params.current_limit_a):
-                        raise RuntimeError("安全制限を超えました")
+                        out_of_limit_count += 1
+                        if out_of_limit_count >= 3:
+                            raise RuntimeError("安全制限を連続して超えました")
+                    else:
+                        out_of_limit_count = 0
                     if ((params.mode == MeasurementMode.CONSTANT_CURRENT or params.mode == MeasurementMode.CONSTANT_VOLTAGE)
                             and params.stop_on_charge
                             and params.target_charge_c > 0

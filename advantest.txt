@@ -1,0 +1,732 @@
+'
+'  6253 GPIB　サンプル・プログラム例：１
+'
+'　取扱説明書　「DC測定」
+'
+'　【動作確認環境】
+'　     GPIBハードウェア    ：  NATIONAL INSTRUMENTS社製 USB-GPIB-HS
+'　     使用モジュール      ：  NI VISA-COMライブラリ　(USB-GPIB-HSに付属のソフトウェア)
+'　     使用言語            :   Microsoft Excel Visual Basic for Applications 32bit/64bit
+'       ※　GPIBアドレスは 1
+'
+'
+Option Explicit                                         ' すべての変数を明示的に宣言
+
+#If VBA7 Then
+Private Declare PtrSafe Sub Sleep Lib "kernel32" (ByVal ms As LongPtr)
+#Else
+Private Declare Sub Sleep Lib "kernel32" (ByVal ms As Long)
+#End If
+
+Dim RM As New VisaComLib.ResourceManager
+Dim INST1 As New VisaComLib.FormattedIO488
+Dim IGPDEV As VisaComLib.IGpib
+Dim SRQ As VisaComLib.IEventManager
+
+Private Sub Sampl1_GPIB_Click()                     ' コマンドボタンのイベント・プロシージャ
+
+    Dim pad As Integer                              ' 本器のアドレス
+    Dim dt As String * 20                           ' データ受信用バッファ
+
+    pad = 1                                         ' 本器のアドレス 1
+    
+    '///// GPIBの初期設定
+    Call GPIB_Open(pad, INST1)                      ' VIG
+    
+    Call gpibwrt(INST1, "C,*RST")                   ' DCL及びパラメータの初期化
+    Call gpibwrt(INST1, "OH1")                      ' ヘッダON
+    
+    Call gpibwrt(INST1, "M1")                       ' トリガ・モード　ホールド
+    Call gpibwrt(INST1, "VF")                       ' 電圧発生ファンクション
+    Call gpibwrt(INST1, "F2")                       ' 電流測定ファンクション
+    
+    Call gpibwrt(INST1, "SOV1,LMI0.3")              ' DC発生値 1V、リミット値 300mA
+    Call gpibwrt(INST1, "OPR")                      ' 出力 ON
+    Call SUBmeas(INST1, dt)                         ' 測定トリガ & 測定データ読込み
+    Cells(1, 1) = Left(dt, 15)                      ' 指定されたセルにデータを代入する
+    
+    'Call gpibwrt(INST1, "SOV2")                     ' DC発生値　2V
+    'Call SUBmeas(INST1, dt)                         ' 測定トリガ & 測定データ読込み
+    'Cells(2, 1) = Left(dt, 15)                      ' 指定されたセルにデータを代入する
+    
+    'Call gpibwrt(INST1, "SOV-2")                    ' DC発生値 -2V
+    'Call SUBmeas(INST1, dt)                         ' 測定トリガ & 測定データ読込み
+    'Cells(3, 1) = Left(dt, 15)                      ' 指定されたセルにデータを代入する
+    
+    'Call gpibwrt(INST1, "SOV4")                     ' DC発生値　4V
+    'Call SUBmeas(INST1, dt)                         ' 測定トリガ & 測定データ読込み
+    'Cells(4, 1) = Left(dt, 15)                      ' 指定されたセルにデータを代入する
+    
+    'Call gpibwrt(INST1, "F1")                       ' 電圧測定ファンクション
+    'Call gpibwrt(INST1, "IF")                       ' 電流発生ファンクション
+    
+    'Call gpibwrt(INST1, "SOI0.002,LMV3")            ' DC発生値2mA、リミット値 3V
+    'Call gpibwrt(INST1, "OPR")                      ' 出力 ON
+    'Call SUBmeas(INST1, dt)                         ' 測定トリガ & 測定データ読込み
+    'Cells(5, 1) = Left(dt, 15)                      ' 指定されたセルにデータを代入する
+    
+    Call gpibwrt(INST1, "SBY")                      ' 出力 OFF
+    
+    Call GPIB_End(INST1)                            ' VIGをオフラインにする
+    
+End Sub                                             ' イベント・プロシージャの終了
+
+' サブルーチン　：　測定トリガ & 測定データ読込み
+Private Sub SUBmeas(INST As VisaComLib.FormattedIO488, dt As String)
+    
+    Call gpibwrt(INST, "*TRG")                      ' 測定トリガをかける
+    Call gpibRd(INST, dt)                           ' 測定データを読込む
+    
+End Sub
+
+'------------------------------------------------------
+'   GPIB初期化&アドレス設定
+'------------------------------------------------------
+Private Sub GPIB_Open(pad As Integer, INST As VisaComLib.FormattedIO488)
+    
+    On Error GoTo ERR_EXIT
+    
+    Set RM = CreateObject("VISA.GlobalRM")                                      ' VISAのオープン
+    Set INST.IO = RM.Open("GPIB0::" & CStr(pad) & "::INSTR", NO_LOCK, 0, "")    ' デバイスオープン
+    
+    INST.IO.Timeout = 10000                                                     ' タイムアウト10s
+    INST.IO.SendEndEnabled = True                                               ' 最終ﾊﾞｲﾄ送信時にEOIを付ける
+    INST.IO.TerminationCharacter = &HA                                           ' 受信ターミネータをLFに設定
+    INST.IO.TerminationCharacterEnabled = True                                  ' LFで受信処理を終了
+    
+    Set IGPDEV = INST.IO
+    IGPDEV.UnaddressingEnabled = True                                           ' 送受信毎にｱﾄﾞﾚｽ設定を行う
+    
+    Exit Sub
+    
+ERR_EXIT:
+
+    MsgBox "Open Err " & Err.Number & vbCr & Err.Description, vbOKOnly
+    
+End Sub
+'------------------------------------------------------
+'   GPIB終了
+'------------------------------------------------------
+Private Sub GPIB_End(INST As VisaComLib.FormattedIO488)
+
+    On Error GoTo ERR_EXIT
+    
+    Set IGPDEV = INST.IO
+    IGPDEV.ControlREN GPIB_REN_GTL                   'ローカルにする
+    
+    INST.IO.Close                                    'デバイスクローズ
+    
+    Set INST = Nothing
+    Set RM = Nothing
+    Exit Sub
+    
+ERR_EXIT:
+
+    MsgBox "Close Err " & Err.Number & vbCr & Err.Description, vbOKOnly
+    
+End Sub
+'-----------------------------------------------------
+'   GPIBコマンド送信
+'-----------------------------------------------------
+Private Sub gpibwrt(INST As VisaComLib.FormattedIO488, cmdstr As String)
+
+    On Error GoTo ERR_EXIT
+    
+    INST.WriteString cmdstr & vbLf                      ' コマンドを送信する
+    Exit Sub
+    
+ERR_EXIT:
+
+    MsgBox "WriteString Err " & Err.Number & vbCr & Err.Description, vbOKOnly
+    
+End Sub
+'-----------------------------------------------------
+'   GPIBデータ受信
+'-----------------------------------------------------
+Private Sub gpibRd(INST As VisaComLib.FormattedIO488, qryData As String)
+
+    On Error GoTo ERR_EXIT
+
+    qryData = Replace(INST.ReadString, vbCrLf, "")      'クエリ応答読み出し&CRLF削除
+    
+    Exit Sub
+    
+ERR_EXIT:
+
+    MsgBox "ReadString Err " & Err.Number & vbCr & Err.Description, vbOKOnly
+    
+End Sub
+
+'-----------------------------------------------------
+'   GPIB SRQ待ち
+'-----------------------------------------------------
+Private Sub gpibWaitSRQ(INST As VisaComLib.FormattedIO488)
+    Dim intSTB As Integer                               ' SPOLL格納変数
+    
+    On Error GoTo ERR_EXIT
+
+    Set SRQ = INST.IO
+    SRQ.EnableEvent EVENT_SERVICE_REQ, EVENT_QUEUE, 0   'サービスリクエストを許可
+
+    SRQ.WaitOnEvent EVENT_SERVICE_REQ                   'サービスリクエストを待つ
+
+    intSTB = INST.IO.ReadSTB                            'シリアルポール
+    Exit Sub
+    
+ERR_EXIT:
+
+    MsgBox "WaitSRQ Err " & Err.Number & vbCr & Err.Description, vbOKOnly
+    
+End Sub
+
+
+'
+'  6253 GPIB　サンプルプログラム例：２
+'
+'　取扱説明書　「ﾊﾟﾙｽ測定の操作」
+'
+'　【動作確認環境】
+'　     GPIBハードウェア    ：  NATIONAL INSTRUMENTS社製 USB-GPIB-HS
+'　     使用モジュール      ：  NI VISA-COMライブラリ　(USB-GPIB-HSに付属のソフトウェア)
+'　     使用言語            :   Microsoft Excel Visual Basic for Applications 32bit/64bit
+'       ※　GPIBアドレスは 1
+'
+'
+Option Explicit                                         ' すべての変数を明示的に宣言
+
+#If VBA7 Then
+Private Declare PtrSafe Sub Sleep Lib "kernel32" (ByVal ms As LongPtr)
+#Else
+Private Declare Sub Sleep Lib "kernel32" (ByVal ms As Long)
+#End If
+
+Dim RM As New VisaComLib.ResourceManager
+Dim INST1 As New VisaComLib.FormattedIO488
+Dim IGPDEV As VisaComLib.IGpib
+Dim SRQ As VisaComLib.IEventManager
+
+Private Sub Sampl2_GPIB_Click()                     ' コマンドボタンのイベント・プロシージャ
+
+    Dim pad As Integer                              ' 本器のアドレス
+    Dim dt As String * 20                           ' データ受信用バッファ
+
+    pad = 1                                         ' 本器のアドレス 1
+        
+    '///// GPIBの初期設定
+    Call GPIB_Open(pad, INST1)                      ' VIG
+        
+    Call gpibwrt(INST1, "C,*RST")                   ' DCL及びパラメータの初期化
+    Call gpibwrt(INST1, "OH1")                      ' ヘッダON
+    Call gpibwrt(INST1, "M1")                       ' トリガ・モード　ホールド
+    Call gpibwrt(INST1, "IF")                       ' 電流発生ファンクション
+    Call gpibwrt(INST1, "F1")                       ' 電圧測定ファンクション
+    Call gpibwrt(INST1, "MD1")                      ' パルス発生モード
+    
+    Call gpibwrt(INST1, "SOI0.1,LMV10")            ' パルス発生値 100mA、リミット値 10V
+    'Call gpibwrt(INST1, "DBV1")                     ' パルス・ベース値 1V
+    Call gpibwrt(INST1, "SP0,4,50,25")             ' ホールド時間0ms、メジャー・ディレイ時間4ms
+                                                    ' ピリオド50ms、パルス幅25ms
+    Call gpibwrt(INST1, "OPR")                      ' 出力 ON
+    Call SUBmeas(INST1, dt)                         ' 測定トリガ & データ読込み
+    Cells(1, 1) = Left(dt, 15)                      ' 指定されたセルにデータを代入する
+    
+    'Call gpibwrt(INST1, "SOV2.5")                   ' パルス発生値 2.5V
+    'Call SUBmeas(INST1, dt)                         ' 測定トリガ & データ読込み
+    'Cells(2, 1) = Left(dt, 15)                      ' 指定されたセルにデータを代入する
+    
+    'Call gpibwrt(INST1, "SP3,60,130,50")            ' ホールド時間3ms、メジャー・ディレイ時間60ms
+                                                    ' ピリオド130ms、パルス時間50ms
+    'Call SUBmeas(INST1, dt)                         ' 測定トリガ & データ読込み
+    'Cells(3, 1) = Left(dt, 15)                      ' 指定されたセルにデータを代入する
+    
+    'Call gpibwrt(INST1, "DBV0.5")                   ' パルス・ベース値 0.5V
+    'Call SUBmeas(INST1, dt)                         ' 測定トリガ & データ読込み
+    'Cells(4, 1) = Left(dt, 15)                      ' 指定されたセルにデータを代入する
+        
+    Call gpibwrt(INST1, "SBY")                      ' 出力　OFF
+    
+    Call GPIB_End(INST1)                            ' VIGをオフラインにする
+End Sub                                             ' イベント・プロシージャの終了
+
+' サブルーチン　：　測定トリガ & 測定データ読込み
+Private Sub SUBmeas(INST As VisaComLib.FormattedIO488, dt As String)
+    
+    Call gpibwrt(INST, "*TRG")                      ' 測定トリガをかける
+    Call gpibRd(INST, dt)                           ' 測定データを読込む
+    
+End Sub
+
+
+'------------------------------------------------------
+'   GPIB初期化&アドレス設定
+'------------------------------------------------------
+Private Sub GPIB_Open(pad As Integer, INST As VisaComLib.FormattedIO488)
+    
+    On Error GoTo ERR_EXIT
+    
+    Set RM = CreateObject("VISA.GlobalRM")                                      ' VISAのオープン
+    Set INST.IO = RM.Open("GPIB0::" & CStr(pad) & "::INSTR", NO_LOCK, 0, "")    ' デバイスオープン
+    
+    INST.IO.Timeout = 10000                                                     ' タイムアウト10s
+    INST.IO.SendEndEnabled = True                                               ' 最終ﾊﾞｲﾄ送信時にEOIを付ける
+    INST.IO.TerminationCharacter = &HA                                          ' 受信ターミネータをLFに設定
+    INST.IO.TerminationCharacterEnabled = True                                  ' LFで受信処理を終了
+    
+    Set IGPDEV = INST.IO
+    IGPDEV.UnaddressingEnabled = True                                           ' 送受信毎にｱﾄﾞﾚｽ設定を行う
+    
+    Exit Sub
+    
+ERR_EXIT:
+
+    MsgBox "Open Err " & Err.Number & vbCr & Err.Description, vbOKOnly
+    
+End Sub
+'------------------------------------------------------
+'   GPIB終了
+'------------------------------------------------------
+Private Sub GPIB_End(INST As VisaComLib.FormattedIO488)
+
+    On Error GoTo ERR_EXIT
+    
+    Set IGPDEV = INST.IO
+    IGPDEV.ControlREN GPIB_REN_GTL                   'ローカルにする
+    
+    INST.IO.Close                                    'デバイスクローズ
+    
+    Set INST = Nothing
+    Set RM = Nothing
+    Exit Sub
+    
+ERR_EXIT:
+
+    MsgBox "Close Err " & Err.Number & vbCr & Err.Description, vbOKOnly
+    
+End Sub
+'-----------------------------------------------------
+'   GPIBコマンド送信
+'-----------------------------------------------------
+Private Sub gpibwrt(INST As VisaComLib.FormattedIO488, cmdstr As String)
+
+    On Error GoTo ERR_EXIT
+    
+    INST.WriteString cmdstr & vbLf                      ' コマンドを送信する
+    Exit Sub
+    
+ERR_EXIT:
+
+    MsgBox "WriteString Err " & Err.Number & vbCr & Err.Description, vbOKOnly
+    
+End Sub
+'-----------------------------------------------------
+'   GPIBデータ受信
+'-----------------------------------------------------
+Private Sub gpibRd(INST As VisaComLib.FormattedIO488, qryData As String)
+
+    On Error GoTo ERR_EXIT
+
+    qryData = Replace(INST.ReadString, vbCrLf, "")      'クエリ応答読み出し&CRLF削除
+    
+    Exit Sub
+    
+ERR_EXIT:
+
+    MsgBox "ReadString Err " & Err.Number & vbCr & Err.Description, vbOKOnly
+    
+End Sub
+
+'-----------------------------------------------------
+'   GPIB SRQ待ち
+'-----------------------------------------------------
+Private Sub gpibWaitSRQ(INST As VisaComLib.FormattedIO488)
+    Dim intSTB As Integer                               ' SPOLL格納変数
+    
+    On Error GoTo ERR_EXIT
+
+    Set SRQ = INST.IO
+    SRQ.EnableEvent EVENT_SERVICE_REQ, EVENT_QUEUE, 0   'サービスリクエストを許可
+
+    SRQ.WaitOnEvent EVENT_SERVICE_REQ                   'サービスリクエストを待つ
+
+    intSTB = INST.IO.ReadSTB                            'シリアルポール
+    Exit Sub
+    
+ERR_EXIT:
+
+    MsgBox "WaitSRQ Err " & Err.Number & vbCr & Err.Description, vbOKOnly
+    
+End Sub
+
+
+'
+'  6253 GPIB　サンプルプログラム例：３
+'
+'　取扱説明書　「スイープ測定」
+'
+'　【動作確認環境】
+'　     GPIBハードウェア    ：  NATIONAL INSTRUMENTS社製 USB-GPIB-HS
+'　     使用モジュール      ：  NI VISA-COMライブラリ　(USB-GPIB-HSに付属のソフトウェア)
+'　     使用言語            :   Microsoft Excel Visual Basic for Applications 32bit/64bit
+'       ※　GPIBアドレスは 1
+
+Option Explicit                                         ' すべての変数を明示的に宣言
+
+#If VBA7 Then
+Private Declare PtrSafe Sub Sleep Lib "kernel32" (ByVal ms As LongPtr)
+#Else
+Private Declare Sub Sleep Lib "kernel32" (ByVal ms As Long)
+#End If
+
+Dim RM As New VisaComLib.ResourceManager
+Dim INST1 As New VisaComLib.FormattedIO488
+Dim IGPDEV As VisaComLib.IGpib
+Dim SRQ As VisaComLib.IEventManager
+
+Private Sub Sampl3_GPIB_Click()                           ' コマンドボタン(Start)のイベント・プロシージャ
+
+    Dim pad As Integer                              ' 本器のアドレス
+    Dim dt As String * 20                           ' データ受信用バッファ
+    Dim s As Integer                                ' シリアル・ポール結果格納変数
+    Dim rowNum As Integer                           ' セルの番号
+    
+    pad = 1                                         ' 本器のアドレス 1
+        
+    '///// GPIBの初期設定
+    Call GPIB_Open(pad, INST1)                      ' VIG
+
+    Call gpibwrt(INST1, "C,*RST")                   ' DCL及びパラメータの初期化
+    Call gpibwrt(INST1, "*CLS")                     ' ステータス・バイトの初期化
+    Call gpibwrt(INST1, "*SRE8")                    ' サービス・リクエスト・イネーブル・レジスタのbit3を1にする
+    Call gpibwrt(INST1, "DSE8192")                  ' デバイス・イベント・イネーブル・レジスタのbit13を1にする
+    Call gpibwrt(INST1, "S0")                       ' SRQ発信モード
+                                                    ' スイープ終了によりSRQを発信させる為のレジスタ設定
+    Call gpibwrt(INST1, "OH1")                      ' ヘッダON
+                                                       
+    Call gpibwrt(INST1, "VF")                       ' 電圧発生ファンクション
+    Call gpibwrt(INST1, "F2")                       ' 電流測定ファンクション
+    Call gpibwrt(INST1, "MD2")                      ' スイープ発生モード
+    
+    Call gpibwrt(INST1, "SN0.00001,0.001,0.00001")    ' リニア・スープ：スタート0.01mV、ストップ1mV、ステップ0.01mV
+    Call gpibwrt(INST1, "SB0")                      ' スイープ・バイアス値 0V
+    Call gpibwrt(INST1, "SP3,4,50")                ' ホールド時間3ms、メジャー・ディレイ時間4ms
+                                                    ' ピリオド50ms
+    Call gpibwrt(INST1, "LMI0.03")                  ' リミット値 30mA
+    
+    Call gpibwrt(INST1, "SM1,RL")                   ' メモリ・ストア ON、メモリ・クリア
+    
+    Call gpibwrt(INST1, "OPR")                      ' 出力 ON
+    Call gpibwrt(INST1, "*TRG")                     ' スイープ・スタート
+    
+                                                    ' スイープ測定終了を待つ
+    Call gpibWaitSRQ(INST1)                         ' SRQが発信されるまで待つ
+       
+    Call gpibwrt(INST1, "SBY")                      ' 出力 OFF
+    
+    rowNum = 1                                      ' セルの列番号の先頭を指定
+    
+                                                    ' 測定バッファ・メモリのデータを読み出す
+    Call gpibwrt(INST1, "RN1,0")                    ' 測定バッファ・メモリ読み出しモードにし、
+                                                    ' 読み出し番号を0番からに指定する
+    Do                                              ' 無限ループ
+        Call gpibRd(INST1, dt)                      ' 測定バッファ・メモリ・データ読込み
+                                                    ' メモリ読み出しモード設定後のデータ読込みで
+                                                    ' メモリのデータが出力され、読み出し番号は+1される
+        Cells(rowNum, 1) = Left(dt, 16)             ' 指定されたセルにデータを代入する
+        If 1 = InStr(1, dt, "EE +8.888888E+30") Then ' 読み出したデータが空のデータならば
+            Exit Do                                 ' 無限ループを抜ける
+        End If                                      ' If の終了
+        rowNum = rowNum + 1                         ' セルの列番号を＋１
+    Loop                                            ' Doの終了
+    Call gpibwrt(INST1, "RN0,0")                    ' 測定バッファ・メモリ読み出しモードを解除
+    
+    Call GPIB_End(INST1)                            ' VIGをオフラインにする
+End Sub                                             ' イベント・プロシージャの終了
+
+'------------------------------------------------------
+'   GPIB初期化&アドレス設定
+'------------------------------------------------------
+Private Sub GPIB_Open(pad As Integer, INST As VisaComLib.FormattedIO488)
+    
+    On Error GoTo ERR_EXIT
+    
+    Set RM = CreateObject("VISA.GlobalRM")                                      ' VISAのオープン
+    Set INST.IO = RM.Open("GPIB0::" & CStr(pad) & "::INSTR", NO_LOCK, 0, "")    ' デバイスオープン
+    
+    INST.IO.Timeout = 10000                                                     ' タイムアウト10s
+    INST.IO.SendEndEnabled = True                                               ' 最終ﾊﾞｲﾄ送信時にEOIを付ける
+    INST.IO.TerminationCharacter = &HA                                           ' 受信ターミネータをLFに設定
+    INST.IO.TerminationCharacterEnabled = True                                  ' LFで受信処理を終了
+    
+    Set IGPDEV = INST.IO
+    IGPDEV.UnaddressingEnabled = True                                           ' 送受信毎にｱﾄﾞﾚｽ設定を行う
+    
+    Exit Sub
+    
+ERR_EXIT:
+
+    MsgBox "Open Err " & Err.Number & vbCr & Err.Description, vbOKOnly
+    
+End Sub
+'------------------------------------------------------
+'   GPIB終了
+'------------------------------------------------------
+Private Sub GPIB_End(INST As VisaComLib.FormattedIO488)
+
+    On Error GoTo ERR_EXIT
+    
+    Set IGPDEV = INST.IO
+    IGPDEV.ControlREN GPIB_REN_GTL                   'ローカルにする
+    
+    INST.IO.Close                                    'デバイスクローズ
+    
+    Set INST = Nothing
+    Set RM = Nothing
+    Exit Sub
+    
+ERR_EXIT:
+
+    MsgBox "Close Err " & Err.Number & vbCr & Err.Description, vbOKOnly
+    
+End Sub
+'-----------------------------------------------------
+'   GPIBコマンド送信
+'-----------------------------------------------------
+Private Sub gpibwrt(INST As VisaComLib.FormattedIO488, cmdstr As String)
+
+    On Error GoTo ERR_EXIT
+    
+    INST.WriteString cmdstr & vbLf                      ' コマンドを送信する
+    Exit Sub
+    
+ERR_EXIT:
+
+    MsgBox "WriteString Err " & Err.Number & vbCr & Err.Description, vbOKOnly
+    
+End Sub
+'-----------------------------------------------------
+'   GPIBデータ受信
+'-----------------------------------------------------
+Private Sub gpibRd(INST As VisaComLib.FormattedIO488, qryData As String)
+
+    On Error GoTo ERR_EXIT
+
+    qryData = Replace(INST.ReadString, vbCrLf, "")      'クエリ応答読み出し&CRLF削除
+    
+    Exit Sub
+    
+ERR_EXIT:
+
+    MsgBox "ReadString Err " & Err.Number & vbCr & Err.Description, vbOKOnly
+    
+End Sub
+
+'-----------------------------------------------------
+'   GPIB SRQ待ち
+'-----------------------------------------------------
+Private Sub gpibWaitSRQ(INST As VisaComLib.FormattedIO488)
+    Dim intSTB As Integer                               ' SPOLL格納変数
+    
+    On Error GoTo ERR_EXIT
+
+    Set SRQ = INST.IO
+    SRQ.EnableEvent EVENT_SERVICE_REQ, EVENT_QUEUE, 0   'サービスリクエストを許可
+
+    SRQ.WaitOnEvent EVENT_SERVICE_REQ                   'サービスリクエストを待つ
+
+    intSTB = INST.IO.ReadSTB                            'シリアルポール
+    Exit Sub
+    
+ERR_EXIT:
+
+    MsgBox "WaitSRQ Err " & Err.Number & vbCr & Err.Description, vbOKOnly
+    
+End Sub
+
+
+
+
+'
+'  6253  GPIB　サンプルプログラム例：４
+'
+'　測定バッファ・メモリの使用（100個の測定データを最短時間で読み出す例）
+'
+'　【動作確認環境】
+'　     GPIBハードウェア    ：  NATIONAL INSTRUMENTS社製 USB-GPIB-HS
+'　     使用モジュール      ：  NI VISA-COMライブラリ　(USB-GPIB-HSに付属のソフトウェア)
+'　     使用言語             :   Microsoft Excel Visual Basic for Applications 32bit/64bit
+'       ※　GPIBアドレスは 1
+
+Option Explicit                                         ' すべての変数を明示的に宣言
+
+#If VBA7 Then
+Private Declare PtrSafe Sub Sleep Lib "kernel32" (ByVal ms As LongPtr)
+#Else
+Private Declare Sub Sleep Lib "kernel32" (ByVal ms As Long)
+#End If
+
+Dim RM As New VisaComLib.ResourceManager
+Dim INST1 As New VisaComLib.FormattedIO488
+Dim IGPDEV As VisaComLib.IGpib
+Dim SRQ As VisaComLib.IEventManager
+
+Private Sub Sampl4_GPIB_Click()                     ' コマンドボタンのイベント・プロシージャ
+
+    Dim pad As Integer                              ' 本器のアドレス
+    Dim dt As String * 20                           ' データ受信用バッファ
+    Dim dt_sz As Integer                            ' 測定バッファ・メモリ・データ数
+    Dim i As Integer, s As Integer                  ' i:Forループ用変数、s:シリアル・ポール結果格納変数
+    Dim buff As String                              ' 測定バッファ・メモリ読み出しデータ格納変数
+    Dim memdt As Variant                            ' 測定バッファ・メモリ・データ分割用変数
+
+    pad = 1                                         ' 本器のアドレス 1
+        
+    '///// GPIBの初期設定
+    Call GPIB_Open(pad, INST1)                      ' VIG
+    
+                                                    ' スイープ測定を実行する
+    Call gpibwrt(INST1, "C,*RST")                   ' DCL及びパラメータの初期化
+    Call gpibwrt(INST1, "*CLS")                     ' ステータス・バイトの初期化
+    Call gpibwrt(INST1, "*SRE8")                    ' サービス・リクエスト・イネーブル・レジスタのbit3を1にする
+    Call gpibwrt(INST1, "DSE8192")                  ' デバイス・イベント・イネーブル・レジスタのbit13を1にする
+    Call gpibwrt(INST1, "S0")                       ' SRQ発信モード
+                                                    ' スイープ終了によりSRQを発信させる為のレジスタ設定
+    Call gpibwrt(INST1, "VF,F2")                    ' 電圧発生、電流測定ファンクション
+    Call gpibwrt(INST1, "MD2")                      ' スイープ発生モード
+    
+    Call gpibwrt(INST1, "SN0.05,5,0.05")            ' リニア・スープ：スタート0.05V、ストップ5V、ステップ0.05V
+    Call gpibwrt(INST1, "SB0")                      ' スイープ・バイアス値 0V
+    Call gpibwrt(INST1, "SP3,4,100")                ' ホールド時間3ms、メジャー・ディレイ時間4ms
+                                                    ' ピリオド100ms
+    Call gpibwrt(INST1, "LMI0.03")                  ' リミット値 30mA
+    
+    Call gpibwrt(INST1, "SM1,RL")                   ' メモリ・ストア ON、メモリ・クリア
+    
+    Call gpibwrt(INST1, "OPR")                      ' 出力 ON
+    Call gpibwrt(INST1, "*TRG")                     ' スイープ・スタート
+    
+                                                    ' スイープ測定終了を待つ
+    Call gpibWaitSRQ(INST1)                         ' SRQが発信されるまで待つ
+        
+    Call gpibwrt(INST1, "SBY")                      ' 出力 OFF
+    
+                                                    ' 測定バッファ・メモリのデータを読み出す
+                                                    ' 出力データ・ヘッダ無し、ブロック・デリミタEOI
+    Call gpibwrt(INST1, "SZ?")                      ' 測定バッファ・メモリ・データ数のクエリ
+    Call gpibRd(INST1, dt)                          ' 測定バッファ・メモリ・データ数を読込む
+    dt_sz = Val(dt)                                 ' 読込んだデータ数を数値変数に変換する
+    Call gpibwrt(INST1, "OH0")                      ' 出力データのヘッダをOFFにする
+    Call gpibwrt(INST1, "DL2")                      ' 出力データのブロック・デリミタをEOIにする
+    Call gpibwrt(INST1, "RDN0," & CStr(dt_sz - 1))  ' 測定バッファ・メモリ読み出し範囲を指定する
+    Call gpibwrt(INST1, "RDT?")                     ' 測定バッファ・メモリ一括読み出し
+    buff = Space$(150000)                           ' 読み出しデータ・サイズ以上の領域を確保する
+    Call gpibRd(INST1, buff)                        ' 測定バッファ・メモリ・データ読込み
+    memdt = Split(buff, ";")                        ' 受信データを分割する
+
+                                                    ' 測定データを表示する
+    For i = 1 To dt_sz                              ' メモリのデータ数回繰り返す
+        Cells(i, 1) = i                             ' 指定されたセルにメモリ番号を代入
+        Cells(i, 2) = "'" & memdt(i - 1)            ' 指定されたセルにデータを代入する
+    Next i                                          ' Forの終了
+       
+    Call GPIB_End(INST1) ' VIGをオフラインにする
+End Sub                                             ' イベント・プロシージャの終了
+
+'------------------------------------------------------
+'   GPIB初期化&アドレス設定
+'------------------------------------------------------
+Private Sub GPIB_Open(pad As Integer, INST As VisaComLib.FormattedIO488)
+    
+    On Error GoTo ERR_EXIT
+    
+    Set RM = CreateObject("VISA.GlobalRM")                                      ' VISAのオープン
+    Set INST.IO = RM.Open("GPIB0::" & CStr(pad) & "::INSTR", NO_LOCK, 0, "")    ' デバイスオープン
+    
+    INST.IO.Timeout = 10000                                                     ' タイムアウト10s
+    INST.IO.SendEndEnabled = True                                               ' 最終ﾊﾞｲﾄ送信時にEOIを付ける
+    INST.IO.TerminationCharacter = &HA                                          ' 受信ターミネータをLFに設定
+    INST.IO.TerminationCharacterEnabled = True                                  ' LFで受信処理を終了
+    
+    Set IGPDEV = INST.IO
+    IGPDEV.UnaddressingEnabled = True                                           ' 送受信毎にｱﾄﾞﾚｽ設定を行う
+    
+    Exit Sub
+    
+ERR_EXIT:
+
+    MsgBox "Open Err " & Err.Number & vbCr & Err.Description, vbOKOnly
+    
+End Sub
+'------------------------------------------------------
+'   GPIB終了
+'------------------------------------------------------
+Private Sub GPIB_End(INST As VisaComLib.FormattedIO488)
+
+    On Error GoTo ERR_EXIT
+    
+    Set IGPDEV = INST.IO
+    IGPDEV.ControlREN GPIB_REN_GTL                   'ローカルにする
+    
+    INST.IO.Close                                    'デバイスクローズ
+    
+    Set INST = Nothing
+    Set RM = Nothing
+    Exit Sub
+    
+ERR_EXIT:
+
+    MsgBox "Close Err " & Err.Number & vbCr & Err.Description, vbOKOnly
+    
+End Sub
+'-----------------------------------------------------
+'   GPIBコマンド送信
+'-----------------------------------------------------
+Private Sub gpibwrt(INST As VisaComLib.FormattedIO488, cmdstr As String)
+
+    On Error GoTo ERR_EXIT
+    
+    INST.WriteString cmdstr & vbLf                      ' コマンドを送信する
+    Exit Sub
+    
+ERR_EXIT:
+
+    MsgBox "WriteString Err " & Err.Number & vbCr & Err.Description, vbOKOnly
+    
+End Sub
+'-----------------------------------------------------
+'   GPIBデータ受信
+'-----------------------------------------------------
+Private Sub gpibRd(INST As VisaComLib.FormattedIO488, qryData As String)
+
+    On Error GoTo ERR_EXIT
+
+    qryData = Replace(INST.ReadString, vbCrLf, "")      'クエリ応答読み出し&CRLF削除
+    
+    Exit Sub
+    
+ERR_EXIT:
+
+    MsgBox "ReadString Err " & Err.Number & vbCr & Err.Description, vbOKOnly
+    
+End Sub
+
+'-----------------------------------------------------
+'   GPIB SRQ待ち
+'-----------------------------------------------------
+Private Sub gpibWaitSRQ(INST As VisaComLib.FormattedIO488)
+    Dim intSTB As Integer                               ' SPOLL格納変数
+    
+    On Error GoTo ERR_EXIT
+
+    Set SRQ = INST.IO
+    SRQ.EnableEvent EVENT_SERVICE_REQ, EVENT_QUEUE, 0   'サービスリクエストを許可
+
+    SRQ.WaitOnEvent EVENT_SERVICE_REQ                   'サービスリクエストを待つ
+
+    intSTB = INST.IO.ReadSTB                            'シリアルポール
+    Exit Sub
+    
+ERR_EXIT:
+
+    MsgBox "WaitSRQ Err " & Err.Number & vbCr & Err.Description, vbOKOnly
+    
+End Sub

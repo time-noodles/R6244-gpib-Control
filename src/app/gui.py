@@ -163,7 +163,7 @@ class ElectrochemistryApp:
         ttk.Entry(rng_frm, textvariable=self.current_range_var).grid(row=0, column=1, sticky="ew")
         ttk.Label(rng_frm, text="Voltage range cmd").grid(row=1, column=0, sticky="w", padx=(0, 4))
         ttk.Entry(rng_frm, textvariable=self.voltage_range_var).grid(row=1, column=1, sticky="ew")
-        ttk.Label(rng_frm, text="例: IRN 2 / VRN 1 (AUTO または空欄 = 自動設定)",
+        ttk.Label(rng_frm, text="例: R0 (AUTO) / R1 (リミット値固定) (AUTO または空欄 = 自動設定)",
                   foreground="gray").grid(row=2, column=0, columnspan=2, sticky="w")
 
     # ── Measurement parameters ─────────────────────────────────────────────────
