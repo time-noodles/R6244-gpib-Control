@@ -111,6 +111,23 @@ class MeasurementResult:
         self.current_a.append(point.current_a)
         self.charge_c.append(point.charge_c)
 
+    def snapshot(self) -> "MeasurementResult":
+        """GUIスレッドが安全に読めるスナップショットを返す。
+
+        4つのリストを同じ長さで切り冗して返す。
+        Python の GIL の下でリストの len()・slice はアトミックなので
+        このアプローチで競合状態を安全に回避できる。
+        """
+        # 最小長で割り冗して全リストの長さを揃える
+        n = min(len(self.time_s), len(self.voltage_v),
+                len(self.current_a), len(self.charge_c))
+        snap = MeasurementResult(mode=self.mode, finished_reason=self.finished_reason)
+        snap.time_s   = self.time_s[:n]
+        snap.voltage_v = self.voltage_v[:n]
+        snap.current_a = self.current_a[:n]
+        snap.charge_c  = self.charge_c[:n]
+        return snap
+
 
 @dataclass(slots=True)
 class DeviceState:
@@ -574,7 +591,8 @@ class MeasurementManager:
 
     def stop(self) -> None:
         self._stop_event.set()
-        self.controller.output(False)
+        # VISA機器への HOLD コマンドは測定スレッドの finally ブロックで送信する。
+        # ここで呼び出すと GUI スレッドから VISA を抓り、タイムアウトの原因になる。
         self.events.put(MeasurementEvent("status", {"message": "停止要求を送信しました"}))
 
     def _emit(self, kind: str, **payload: object) -> None:

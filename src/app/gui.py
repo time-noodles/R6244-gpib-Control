@@ -682,7 +682,8 @@ class ElectrochemistryApp:
     def _update_plot(self) -> None:
         if self.manager is None:
             return
-        result = self.manager.result
+        # snapshot() で 4 リストを同じ長さで揃えてから読む（race condition 対策）
+        result = self.manager.result.snapshot()
         n = len(result.time_s)
         if n == 0:
             return
