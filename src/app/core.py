@@ -270,6 +270,11 @@ class BaseDevice(ABC):
         """出力中に電位値だけを更新する（モード初期化コマンドは送らない）。"""
         raise NotImplementedError
 
+    @abstractmethod
+    def update_output_current(self, current_a: float) -> None:
+        """出力中に電流値だけを更新する（モード初期化コマンドは送らない）。"""
+        raise NotImplementedError
+
 
 try:
     import pyvisa
@@ -427,6 +432,18 @@ class R6244Device(BaseDevice):
         cmd = f"D {voltage_v}V"
         self._write(cmd)
 
+    def update_output_current(self, current_a: float) -> None:
+        """出力中に電流値だけを更新する（MD0・IF は送らない）。"""
+        self._state.current_a = current_a
+        current_ua = current_a * 1e6
+        current_ua_truncated = int(current_ua * 100) / 100
+        if current_ua_truncated == int(current_ua_truncated):
+            num_str = str(int(current_ua_truncated))
+        else:
+            num_str = str(current_ua_truncated)
+        cmd = f"D {num_str}UA"
+        self._write(cmd)
+
 
 @dataclass(slots=True)
 class SimulatedR6244Device(BaseDevice):
@@ -481,6 +498,10 @@ class SimulatedR6244Device(BaseDevice):
         self._state.voltage_v = voltage_v
         self.target_voltage_v = voltage_v
 
+    def update_output_current(self, current_a: float) -> None:
+        self._state.current_a = current_a
+        self.target_current_a = current_a
+
 
 def build_device(device_config: dict) -> BaseDevice:
     mode = device_config.get("mode", "simulation")
@@ -520,6 +541,9 @@ class ElectrochemistryController:
 
     def update_output_voltage(self, voltage_v: float) -> None:
         self.device.update_output_voltage(voltage_v)
+
+    def update_output_current(self, current_a: float) -> None:
+        self.device.update_output_current(current_a)
 
 
 def within_limits(voltage_v: float, current_a: float, voltage_limit_v: float, current_limit_a: float) -> bool:
@@ -627,6 +651,9 @@ class MeasurementManager:
             self.result.finished_reason = f"error: {exc}"
             self._emit("error", message=str(exc))
         finally:
+            # H コマンド（HOLD）のみ送信：電流源は即座に開回路（高インピーダンス）になる。
+            # 0A/0V を印加してから HOLD すると試料（特にインターカレーション系）に
+            # 不要な電位が加わるため、直接 HOLD で回路を切る。
             self.controller.output(False)
             self._emit("status", message="測定を終了しました")
 

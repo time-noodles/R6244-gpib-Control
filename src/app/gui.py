@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import tkinter as tk
 from enum import Enum
 from pathlib import Path
@@ -606,54 +607,105 @@ class ElectrochemistryApp:
 
     # ── Event polling & plot ───────────────────────────────────────────────────
 
+    # 1サイクルで描画する最大データ点数（これを超えた分は間引きダウンサンプリング）
+    _MAX_PLOT_POINTS: int = 2000
+    # プロット更新の最小間隔（秒）：これより短い間隔では描画しない
+    _PLOT_INTERVAL_S: float = 1.0
+
     def _poll_events(self) -> None:
         if self.manager is not None:
+            latest_point = None
             while True:
                 try:
                     event = self.manager.events.get_nowait()
                 except Exception:
                     break
-                self._handle_event(event.kind, event.payload)
+                if event.kind == "point":
+                    # ステータス表示は最新点だけ更新（中間点はスキップ）
+                    latest_point = event.payload["point"]
+                else:
+                    # "finished" / "error" / "status" は必ず処理
+                    self._handle_nonepoint_event(event.kind, event.payload)
+
+            if latest_point is not None:
+                self.voltage_status_var.set(format_voltage(latest_point.voltage_v))
+                self.current_status_var.set(format_current(latest_point.current_a))
+                self.charge_status_var.set(format_charge(latest_point.charge_c))
+                self.elapsed_status_var.set(f"{latest_point.time_s:.1f} s")
+
+                # プロットは _PLOT_INTERVAL_S 秒に１回だけ更新
+                now = time.monotonic()
+                if now - getattr(self, "_last_plot_time", 0.0) >= self._PLOT_INTERVAL_S:
+                    self._update_plot()
+                    self._last_plot_time = now
+
         self.root.after(100, self._poll_events)
 
-    def _handle_event(self, kind: str, payload: dict) -> None:
-        if kind == "point":
-            point = payload["point"]
-            self.voltage_status_var.set(format_voltage(point.voltage_v))
-            self.current_status_var.set(format_current(point.current_a))
-            self.charge_status_var.set(format_charge(point.charge_c))
-            self.elapsed_status_var.set(f"{point.time_s:.1f} s")
-            self._update_plot()
-        elif kind == "status":
+    def _handle_nonepoint_event(self, kind: str, payload: dict) -> None:
+        """"point" 以外のイベントを処理する。"""
+        if kind == "status":
             self.message_var.set(payload.get("message", ""))
         elif kind == "finished":
             self.message_var.set(f"Finished: {payload.get('reason', '')}")
+            self._update_plot()             # 終了時は必ず最終プロットを描画
             self._save_btn.config(state="normal")   # CSV 保存ボタン有効化
         elif kind == "error":
             msg = payload.get("message", "Unknown error")
             self.message_var.set(msg)
-            messagebox.showerror("測定エラー", msg)
+            self._update_plot()
             self._save_btn.config(state="normal")
+            messagebox.showerror("測定エラー", msg)
 
-    def _update_plot(self) -> None:
-        if self.manager is None:
-            return
-        result = self.manager.result
-        mode = result.mode
+    def _ensure_plot_line(self, mode: str) -> None:
+        """モードに対応した Line2D オブジェクトを初期化する。
+        同じモードなら再利用。変わったときだけ axis.clear() を実行。
+        """
+        if getattr(self, "_plot_mode", None) == mode:
+            return  # 既存の Line2D を再利用→ set_data() だけで済む
+
         self.axis.clear()
         self.axis.grid(True, alpha=0.3)
         if mode == MeasurementMode.CV.value:
             self.axis.set_xlabel("Voltage (V)")
             self.axis.set_ylabel("Current (A)")
-            self.axis.plot(result.voltage_v, result.current_a, color="#c0392b", linewidth=1.5)
+            (self._plot_line,) = self.axis.plot([], [], color="#c0392b", linewidth=1.0)
         elif mode == MeasurementMode.CONSTANT_VOLTAGE.value:
             self.axis.set_xlabel("Time (s)")
             self.axis.set_ylabel("Current (A)")
-            self.axis.plot(result.time_s, result.current_a, color="#2980b9", linewidth=1.5)
-        else:  # constant_current
+            (self._plot_line,) = self.axis.plot([], [], color="#2980b9", linewidth=1.0)
+        else:
             self.axis.set_xlabel("Time (s)")
             self.axis.set_ylabel("Voltage (V)")
-            self.axis.plot(result.time_s, result.voltage_v, color="#16a085", linewidth=1.5)
+            (self._plot_line,) = self.axis.plot([], [], color="#16a085", linewidth=1.0)
+        self._plot_mode = mode
+
+    def _update_plot(self) -> None:
+        if self.manager is None:
+            return
+        result = self.manager.result
+        n = len(result.time_s)
+        if n == 0:
+            return
+        mode = result.mode
+
+        # ダウンサンプリング：描画点数を _MAX_PLOT_POINTS 以内に押さえる
+        step = max(1, n // self._MAX_PLOT_POINTS)
+        t  = result.time_s[::step]
+        v  = result.voltage_v[::step]
+        ia = result.current_a[::step]
+
+        # モード変更時のみ clear() する（毎回 clear()+plot() しない）
+        self._ensure_plot_line(mode)
+
+        if mode == MeasurementMode.CV.value:
+            self._plot_line.set_data(v, ia)
+        elif mode == MeasurementMode.CONSTANT_VOLTAGE.value:
+            self._plot_line.set_data(t, ia)
+        else:
+            self._plot_line.set_data(t, v)
+
+        self.axis.relim()
+        self.axis.autoscale_view()
         self.canvas.draw_idle()
 
     def _save_params_to_config(self) -> None:
