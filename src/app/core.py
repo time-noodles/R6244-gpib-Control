@@ -413,17 +413,7 @@ class R6244Device(BaseDevice):
         # Send voltage compliance limit (using compatibility syntax)
         self._write(f"D {voltage_limit_v}V")
 
-        # Current range configuration
-        if self.commands.current_range_cmd:
-            cmd_str = self.commands.current_range_cmd.strip().upper()
-            if cmd_str == "AUTO":
-                self._write("F2")
-                self._write("R0")
-            elif cmd_str:
-                self._write("F2")
-                self._write(cmd_str)
-
-        # Voltage range configuration
+        # Voltage range configuration (only configure voltage measurement range in CC mode)
         if self.commands.voltage_range_cmd:
             cmd_str = self.commands.voltage_range_cmd.strip().upper()
             if cmd_str == "AUTO":
@@ -454,7 +444,7 @@ class R6244Device(BaseDevice):
         # Send current compliance limit (using compatibility syntax)
         self._write(f"D {current_limit_a}A")
 
-        # Current range configuration
+        # Current range configuration (only configure current measurement range in CV mode)
         if self.commands.current_range_cmd:
             cmd_str = self.commands.current_range_cmd.strip().upper()
             if cmd_str == "AUTO":
@@ -462,16 +452,6 @@ class R6244Device(BaseDevice):
                 self._write("R0")
             elif cmd_str:
                 self._write("F2")
-                self._write(cmd_str)
-
-        # Voltage range configuration
-        if self.commands.voltage_range_cmd:
-            cmd_str = self.commands.voltage_range_cmd.strip().upper()
-            if cmd_str == "AUTO":
-                self._write("F1")
-                self._write("R0")
-            elif cmd_str:
-                self._write("F1")
                 self._write(cmd_str)
 
         # VBA Str() emulation: prepend space before number
@@ -714,6 +694,9 @@ class MeasurementManager:
 
             self.controller.output(True)
 
+            last_elapsed = 0.0
+            last_current = None
+
             if params.mode == MeasurementMode.CV:
                 for _ in range(max(1, params.cycles)):
                     for voltage_v in self._voltage_path(params.scan_start_v, params.scan_stop_v, params.scan_rate_v_per_s, params.sample_interval_s):
@@ -725,7 +708,12 @@ class MeasurementManager:
                         measured_voltage = self.controller.read_voltage()
                         measured_current = self.controller.read_current()
                         elapsed = time.monotonic() - start_time
-                        accumulated_charge += abs(measured_current) * params.sample_interval_s
+                        delta_t = elapsed - last_elapsed
+                        last_elapsed = elapsed
+                        if last_current is None:
+                            last_current = measured_current
+                        accumulated_charge += (abs(last_current) + abs(measured_current)) / 2.0 * delta_t
+                        last_current = measured_current
                         point = MeasurementPoint(elapsed, measured_voltage, measured_current, accumulated_charge)
                         self.result.append(point)
                         self._emit("point", point=point)
@@ -747,10 +735,12 @@ class MeasurementManager:
                     measured_voltage = self.controller.read_voltage()
                     measured_current = self.controller.read_current()
                     elapsed = time.monotonic() - start_time
-                    if params.mode == MeasurementMode.CONSTANT_CURRENT:
-                        accumulated_charge += abs(measured_current) * params.sample_interval_s
-                    else:
-                        accumulated_charge += abs(measured_current) * params.sample_interval_s
+                    delta_t = elapsed - last_elapsed
+                    last_elapsed = elapsed
+                    if last_current is None:
+                        last_current = measured_current
+                    accumulated_charge += (abs(last_current) + abs(measured_current)) / 2.0 * delta_t
+                    last_current = measured_current
                     point = MeasurementPoint(elapsed, measured_voltage, measured_current, accumulated_charge)
                     self.result.append(point)
                     self._emit("point", point=point)
