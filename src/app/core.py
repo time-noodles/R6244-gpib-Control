@@ -7,7 +7,7 @@ import re
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -257,6 +257,58 @@ def safe_resource_name(resource_name: str, gpib_address: str) -> str:
     return resource_name.strip() or (f"GPIB0::{gpib_address.strip()}::INSTR" if gpib_address.strip() else "")
 
 
+@dataclass
+class DynamicJumpDetector:
+    """移動平均および対数移動平均（Log Moving Average）による動的スパイクノイズ検知器。
+
+    電流は対数スケール log10(|I|) で追従し、直前の移動平均トレンドから急変（例: 1桁/10倍以上）
+    した点をスパイクノイズとして自動検知します。
+    """
+    window_size: int = 5
+    min_points: int = 3
+    log_threshold: float = 0.7       # 約5倍（0.7桁）の急変を検知
+    current_floor_a: float = 1e-10    # 0.1 nA (対数計算のゼロ割・発散防止)
+    min_current_jump_a: float = 5e-6  # 5 uA 以下の微小変化はノイズとみなさない
+    voltage_multiplier: float = 5.0   # 平均差分の5倍
+    min_voltage_jump_v: float = 0.3   # 0.3 V 以下の微小変化は誤検知しない
+
+    v_history: deque[float] = field(default_factory=lambda: deque(maxlen=5))
+    i_history: deque[float] = field(default_factory=lambda: deque(maxlen=5))
+
+    def reset(self) -> None:
+        self.v_history.clear()
+        self.i_history.clear()
+
+    def is_voltage_anomaly(self, v: float) -> bool:
+        if len(self.v_history) < self.min_points:
+            return False
+        mean_v = sum(self.v_history) / len(self.v_history)
+        diffs = [abs(self.v_history[i] - self.v_history[i - 1]) for i in range(1, len(self.v_history))]
+        avg_diff = sum(diffs) / len(diffs) if diffs else 0.0
+        threshold = max(self.voltage_multiplier * avg_diff, self.min_voltage_jump_v)
+        return abs(v - mean_v) > threshold
+
+    def is_current_anomaly(self, i: float) -> bool:
+        if len(self.i_history) < self.min_points:
+            return False
+        abs_i = abs(i)
+        mean_i = sum(abs(x) for x in self.i_history) / len(self.i_history)
+        abs_diff = abs(abs_i - mean_i)
+        if abs_diff < self.min_current_jump_a:
+            return False
+
+        log_history = [math.log10(max(abs(x), self.current_floor_a)) for x in self.i_history]
+        mean_log = sum(log_history) / len(log_history)
+        cur_log = math.log10(max(abs_i, self.current_floor_a))
+        return abs(cur_log - mean_log) > self.log_threshold
+
+    def update_voltage(self, v: float) -> None:
+        self.v_history.append(v)
+
+    def update_current(self, i: float) -> None:
+        self.i_history.append(i)
+
+
 class BaseDevice(ABC):
     @abstractmethod
     def connect(self, resource_name: str) -> DeviceState:
@@ -333,6 +385,12 @@ class R6244Commands:
 class R6244Device(BaseDevice):
     commands: R6244Commands = field(default_factory=R6244Commands)
     timeout_ms: int = 5000
+    max_retries: int = 3
+    retry_delay_s: float = 0.03
+    max_jump_v: float = 0.0
+    max_jump_a: float = 0.0
+    auto_jump_mode: bool = True
+    jump_detector: DynamicJumpDetector | None = field(default_factory=DynamicJumpDetector)
 
     def __post_init__(self) -> None:
         self._resource = None
@@ -485,23 +543,53 @@ class R6244Device(BaseDevice):
             return None
 
     def read_voltage(self) -> float:
-        response = self._query(self.commands.measure_voltage)
-        value = self._parse_response_value(response)
-        if value is not None:
-            if abs(value) <= 25.0:
-                self._state.voltage_v = value
+        for attempt in range(1, self.max_retries + 1):
+            response = self._query(self.commands.measure_voltage)
+            value = self._parse_response_value(response)
+            if value is None:
+                print(f"[WARNING] 電圧測定値パース失敗 (試行 {attempt}/{self.max_retries}): {repr(response)}")
+            elif abs(value) > 25.0:
+                print(f"[WARNING] 無効な電圧測定値 (定格超過) (試行 {attempt}/{self.max_retries}): {value}")
+            elif self.auto_jump_mode and self.jump_detector and self.jump_detector.is_voltage_anomaly(value):
+                print(f"[WARNING] 電圧動的ジャンプ検知 (移動平均乖離) (試行 {attempt}/{self.max_retries}): {value}")
+            elif (self.max_jump_v > 0 and self._state.voltage_v != 0.0 
+                  and abs(value - self._state.voltage_v) > self.max_jump_v):
+                print(f"[WARNING] 電圧急変検知 (ジャンプ超過) (試行 {attempt}/{self.max_retries}): {value} (前回値: {self._state.voltage_v})")
             else:
-                print(f"[WARNING] 無効な電圧測定値を無視しました: {value}")
+                self._state.voltage_v = value
+                if self.jump_detector:
+                    self.jump_detector.update_voltage(value)
+                return self._state.voltage_v
+
+            if attempt < self.max_retries and self.retry_delay_s > 0:
+                time.sleep(self.retry_delay_s)
+
+        print(f"[ERROR] 電圧読み取りで最大リトライ回数({self.max_retries})を超過しました。直前値を維持します: {self._state.voltage_v}")
         return self._state.voltage_v
 
     def read_current(self) -> float:
-        response = self._query(self.commands.measure_current)
-        value = self._parse_response_value(response)
-        if value is not None:
-            if abs(value) <= 12.0:
-                self._state.current_a = value
+        for attempt in range(1, self.max_retries + 1):
+            response = self._query(self.commands.measure_current)
+            value = self._parse_response_value(response)
+            if value is None:
+                print(f"[WARNING] 電流測定値パース失敗 (試行 {attempt}/{self.max_retries}): {repr(response)}")
+            elif abs(value) > 12.0:
+                print(f"[WARNING] 無効な電流測定値 (定格超過) (試行 {attempt}/{self.max_retries}): {value}")
+            elif self.auto_jump_mode and self.jump_detector and self.jump_detector.is_current_anomaly(value):
+                print(f"[WARNING] 電流動的ジャンプ検知 (対数移動平均乖離) (試行 {attempt}/{self.max_retries}): {value}")
+            elif (self.max_jump_a > 0 and self._state.current_a != 0.0 
+                  and abs(value - self._state.current_a) > self.max_jump_a):
+                print(f"[WARNING] 電流急変検知 (ジャンプ超過) (試行 {attempt}/{self.max_retries}): {value} (前回値: {self._state.current_a})")
             else:
-                print(f"[WARNING] 無効な電流測定値を無視しました: {value}")
+                self._state.current_a = value
+                if self.jump_detector:
+                    self.jump_detector.update_current(value)
+                return self._state.current_a
+
+            if attempt < self.max_retries and self.retry_delay_s > 0:
+                time.sleep(self.retry_delay_s)
+
+        print(f"[ERROR] 電流読み取りで最大リトライ回数({self.max_retries})を超過しました。直前値を維持します: {self._state.current_a}")
         return self._state.current_a
 
     def output(self, enabled: bool) -> None:
@@ -597,7 +685,15 @@ def build_device(device_config: dict) -> BaseDevice:
     if mode == "simulation":
         return SimulatedR6244Device(resource_name=device_config.get("resource_name", "SIMULATOR"))
     commands = R6244Commands(**device_config.get("commands", {}))
-    return R6244Device(commands=commands, timeout_ms=int(device_config.get("timeout_ms", 5000)))
+    return R6244Device(
+        commands=commands,
+        timeout_ms=int(device_config.get("timeout_ms", 5000)),
+        max_retries=int(device_config.get("max_retries", 3)),
+        retry_delay_s=float(device_config.get("retry_delay_s", device_config.get("retry_delay_ms", 30) / 1000.0 if "retry_delay_ms" in device_config else 0.03)),
+        max_jump_v=float(device_config.get("max_jump_v", 0.0)),
+        max_jump_a=float(device_config.get("max_jump_a", 0.0)),
+        auto_jump_mode=bool(device_config.get("auto_jump_mode", True)),
+    )
 
 
 @dataclass(slots=True)
@@ -677,6 +773,8 @@ class MeasurementManager:
         start_time = time.monotonic()
         accumulated_charge = 0.0
         out_of_limit_count = 0
+        if hasattr(self.controller.device, "jump_detector") and self.controller.device.jump_detector:
+            self.controller.device.jump_detector.reset()
         try:
             if params.mode == MeasurementMode.CONSTANT_CURRENT:
                 # stop_on_charge=True の場合のみ電気量から目標値を計算する

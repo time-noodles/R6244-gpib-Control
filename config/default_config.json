@@ -14,7 +14,12 @@
       "measure_voltage": "F1"
     },
     "current_range_cmd": "AUTO",
-    "voltage_range_cmd": "AUTO"
+    "voltage_range_cmd": "AUTO",
+    "max_retries": 3,
+    "retry_delay_ms": 30,
+    "max_jump_v": 0.0,
+    "max_jump_a": 0.0,
+    "auto_jump_mode": true
   },
   "measurement": {
     "sample_interval_s": 1.0,
